@@ -1,23 +1,29 @@
 """
-Complete workflow: Screen carbon-rich compounds → Annotate melting points → Rank candidates.
+Complete workflow: Screen carbon-rich compounds -> Annotate melting points -> Rank candidates.
 
 This is the main entry point that combines:
 1. Materials Project API querying for carbon-rich compounds
 2. Melting point estimation/lookup
 3. Ranking candidates for graphitization catalyst research
 
+Supports multiple search modes:
+  - binary:  M-C         (metal carbides)
+  - ternary: M-partner-C (metal + nonmetal/metal + carbon)
+  - bimetal: M1-M2-C     (two metals + carbon)
+  - all:     all of the above
+
 Example usage:
-    # Screen all rare earth borocarbides (RE-B-C systems)
-    python run_screening.py --api-key YOUR_KEY --metal-group rare_earth --nonmetal B
+    # Full search: binary + ternary + bimetal for rare earths with B as partner
+    python run_screening.py --api-key KEY --mode all --metal-group rare_earth --partner-group nonmetal
 
-    # Screen specific systems
-    python run_screening.py --api-key YOUR_KEY --systems La-B-C Ce-B-C Y-B-C Sc-B-C
+    # Just binary rare earth carbides
+    python run_screening.py --api-key KEY --mode binary --metal-group rare_earth
 
-    # Screen all rare earth systems with B, N, Si
-    python run_screening.py --api-key YOUR_KEY --metal-group rare_earth --nonmetal all
+    # Bimetal carbides: rare earth + refractory metals
+    python run_screening.py --api-key KEY --mode bimetal --metal-group rare_earth --partner-group transition_5d
 
-    # Broader search: include metastable phases
-    python run_screening.py --api-key YOUR_KEY --metal-group rare_earth --nonmetal B --max-ehull 0.3
+    # Specific systems
+    python run_screening.py --api-key KEY --systems La-B-C Hf-Ta-C La-C
 """
 
 import argparse
@@ -25,7 +31,10 @@ from datetime import datetime
 
 import pandas as pd
 
-from screen_carbon_rich_compounds import METAL_GROUPS, NONMETALS, screen_systems, find_highest_carbon_per_system
+from screen_carbon_rich_compounds import (
+    METAL_GROUPS, PARTNER_GROUPS, SEARCH_MODES,
+    screen_systems, find_highest_carbon_per_system,
+)
 from predict_melting_point import annotate_with_melting_points, filter_by_melting_point
 
 
@@ -46,7 +55,7 @@ def rank_candidates(
     The ideal compound has:
     - High carbon content (more C available for precipitation)
     - Good thermodynamic stability (will actually form at temperature)
-    - Melting point in the 2000-2500°C range (matches process conditions)
+    - Melting point in the 2000-2500 C range (matches process conditions)
     """
     df = df.copy()
 
@@ -93,15 +102,43 @@ def main():
         description="Complete screening workflow for graphitization catalyst candidates"
     )
     parser.add_argument("--api-key", required=True, help="Materials Project API key")
-    parser.add_argument("--systems", nargs="+", default=None)
-    parser.add_argument("--metal-group", default=None, choices=list(METAL_GROUPS.keys()))
-    parser.add_argument("--nonmetal", default=None)
-    parser.add_argument("--min-c-fraction", type=float, default=0.25)
-    parser.add_argument("--max-ehull", type=float, default=0.1)
+    parser.add_argument(
+        "--systems", nargs="+", default=None,
+        help="Explicit chemical systems (e.g., La-B-C Hf-Ta-C La-C). Bypasses --mode"
+    )
+    parser.add_argument(
+        "--mode", default="ternary", choices=SEARCH_MODES,
+        help=(
+            "Search mode: "
+            "'binary' = M-C; "
+            "'ternary' = M-partner-C; "
+            "'bimetal' = M1-M2-C; "
+            "'all' = all combined. "
+            "(default: ternary)"
+        ),
+    )
+    parser.add_argument(
+        "--metal-group", default=None, choices=list(METAL_GROUPS.keys()),
+        help="Primary metal element group"
+    )
+    parser.add_argument(
+        "--partner-group", default=None, choices=list(PARTNER_GROUPS.keys()),
+        help="Partner element group for ternary/bimetal modes"
+    )
+    parser.add_argument(
+        "--partner-elements", nargs="+", default=None,
+        help="Explicit partner elements (overrides --partner-group). E.g., B N Si Hf Ta"
+    )
+    parser.add_argument("--min-c-fraction", type=float, default=0.25,
+                        help="Minimum carbon atomic fraction (default: 0.25)")
+    parser.add_argument("--max-ehull", type=float, default=0.1,
+                        help="Maximum energy above hull in eV/atom (default: 0.1)")
     parser.add_argument("--experimental-only", action="store_true",
                         help="Only include experimentally synthesized compounds")
-    parser.add_argument("--mp-min", type=float, default=2000)
-    parser.add_argument("--mp-max", type=float, default=2500)
+    parser.add_argument("--mp-min", type=float, default=2000,
+                        help="Minimum melting point filter in degrees C (default: 2000)")
+    parser.add_argument("--mp-max", type=float, default=2500,
+                        help="Maximum melting point filter in degrees C (default: 2500)")
     parser.add_argument("--output-prefix", default=None, help="Prefix for output files")
     args = parser.parse_args()
 
@@ -110,7 +147,8 @@ def main():
 
     print("=" * 70)
     print("Graphitization Catalyst Candidate Screening")
-    print(f"Target: Highest-carbon compounds with mp in {args.mp_min}-{args.mp_max}°C")
+    print(f"Mode: {args.mode}" + (" (bypassed by --systems)" if args.systems else ""))
+    print(f"Target: Highest-carbon compounds with mp in {args.mp_min}-{args.mp_max} C")
     print("=" * 70)
 
     # Step 1: Query Materials Project
@@ -118,8 +156,10 @@ def main():
     df = screen_systems(
         api_key=args.api_key,
         systems=args.systems,
+        mode=args.mode,
         metal_group=args.metal_group,
-        nonmetal=args.nonmetal,
+        partner_group=args.partner_group,
+        partner_elements=args.partner_elements,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
         experimental_only=args.experimental_only,

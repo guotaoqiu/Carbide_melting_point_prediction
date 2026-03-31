@@ -1,15 +1,19 @@
 """
-Screen carbon-rich compounds in ternary M-X-C systems using the Materials Project API.
+Screen carbon-rich compounds in various chemical systems using the Materials Project API.
 
 Purpose: For graphitization catalyst research, find compounds with the highest carbon
-content in specific ternary chemical systems (e.g., La-B-C → La(BC)2).
-These are candidate phases that may form during high-temperature graphitization
-and act as carbon-precipitation intermediates.
+content in specific chemical systems. Supports multiple search modes:
+  - binary:    M-C       (metal carbides, e.g., LaC2, TiC)
+  - ternary:   M-X-C     (metal + any partner + carbon, e.g., La-B-C, Ti-Si-C)
+  - bimetal:   M1-M2-C   (two metals + carbon, e.g., Ta-Hf-C)
+  - all:       all of the above combined
 
 Usage:
-    python screen_carbon_rich_compounds.py --api-key YOUR_MP_API_KEY
-    python screen_carbon_rich_compounds.py --api-key YOUR_MP_API_KEY --systems La-B-C Fe-B-C
-    python screen_carbon_rich_compounds.py --api-key YOUR_MP_API_KEY --metal-group rare_earth --nonmetal B
+    python screen_carbon_rich_compounds.py --api-key KEY --mode all --metal-group rare_earth
+    python screen_carbon_rich_compounds.py --api-key KEY --mode binary --metal-group transition_3d
+    python screen_carbon_rich_compounds.py --api-key KEY --mode ternary --metal-group rare_earth --partner-group nonmetal
+    python screen_carbon_rich_compounds.py --api-key KEY --mode bimetal --metal-group rare_earth --partner-group transition_5d
+    python screen_carbon_rich_compounds.py --api-key KEY --systems La-B-C Hf-Ta-C La-C
 
 Requirements:
     pip install mp-api pymatgen pandas
@@ -39,15 +43,95 @@ METAL_GROUPS = {
     "alkali": ["Li", "Na", "K"],
 }
 
-# Non-metal partners commonly forming ternary compounds with C
-NONMETALS = ["B", "N", "Si", "P", "S"]
+PARTNER_GROUPS = {
+    # Non-metals
+    "nonmetal": ["B", "N", "Si", "P", "S"],
+    "nonmetal_extended": ["B", "N", "Si", "P", "S", "Se", "Te", "O", "F", "Cl"],
+    # Metal groups (same as METAL_GROUPS, available as partner choices)
+    "rare_earth": METAL_GROUPS["rare_earth"],
+    "transition_3d": METAL_GROUPS["transition_3d"],
+    "transition_4d": METAL_GROUPS["transition_4d"],
+    "transition_5d": METAL_GROUPS["transition_5d"],
+    "actinide": METAL_GROUPS["actinide"],
+    "alkaline_earth": METAL_GROUPS["alkaline_earth"],
+    "alkali": METAL_GROUPS["alkali"],
+}
+
+SEARCH_MODES = ["binary", "ternary", "bimetal", "all"]
+
+
+def generate_systems(
+    mode: str,
+    metal_group: Optional[str] = None,
+    partner_group: Optional[str] = None,
+    partner_elements: Optional[list[str]] = None,
+) -> list[str]:
+    """
+    Generate chemical system strings based on search mode.
+
+    Args:
+        mode: One of "binary", "ternary", "bimetal", "all"
+        metal_group: Key into METAL_GROUPS for the primary metals
+        partner_group: Key into PARTNER_GROUPS for the partner elements (ternary/bimetal)
+        partner_elements: Explicit list of partner elements (overrides partner_group)
+
+    Returns:
+        Deduplicated list of chemical system strings (e.g., ["La-C", "La-B-C", ...])
+    """
+    if metal_group is None:
+        raise ValueError("--metal-group is required when not using --systems")
+
+    metals = METAL_GROUPS.get(metal_group)
+    if metals is None:
+        raise ValueError(f"Unknown metal group: {metal_group}. Options: {list(METAL_GROUPS.keys())}")
+
+    # Resolve partner elements
+    partners = None
+    if partner_elements:
+        partners = partner_elements
+    elif partner_group:
+        partners = PARTNER_GROUPS.get(partner_group)
+        if partners is None:
+            raise ValueError(f"Unknown partner group: {partner_group}. Options: {list(PARTNER_GROUPS.keys())}")
+
+    systems = set()
+
+    # Binary: M-C
+    if mode in ("binary", "all"):
+        for m in metals:
+            systems.add(f"{m}-C")
+
+    # Ternary: M-partner-C (partner can be anything)
+    if mode in ("ternary", "all"):
+        if partners is None:
+            raise ValueError("--partner-group or --partner-elements required for ternary/all mode")
+        for m, x in itertools.product(metals, partners):
+            if m != x:  # avoid M-M-C duplicates (that's bimetal within same group)
+                # Sort to get canonical chemsys form
+                elements = sorted([m, x, "C"])
+                systems.add("-".join(elements))
+
+    # Bimetal: M1-M2-C (two metals from potentially different groups)
+    if mode in ("bimetal", "all"):
+        if partners is None:
+            # If no partner specified for bimetal, use pairs within the same metal group
+            for m1, m2 in itertools.combinations(metals, 2):
+                elements = sorted([m1, m2, "C"])
+                systems.add("-".join(elements))
+        else:
+            for m, p in itertools.product(metals, partners):
+                if m != p:
+                    elements = sorted([m, p, "C"])
+                    systems.add("-".join(elements))
+
+    return sorted(systems)
 
 
 def query_chemsys(
     mpr: MPRester,
     chemsys: str,
     min_carbon_fraction: float = 0.2,
-    max_energy_above_hull: float = 0.1,  # eV/atom, for thermodynamic stability
+    max_energy_above_hull: float = 0.1,
     experimental_only: bool = False,
 ) -> list[dict]:
     """
@@ -55,11 +139,10 @@ def query_chemsys(
 
     Args:
         mpr: MPRester client instance
-        chemsys: Chemical system string, e.g. "La-B-C"
+        chemsys: Chemical system string, e.g. "La-B-C" or "La-C"
         min_carbon_fraction: Minimum atomic fraction of carbon (0-1)
         max_energy_above_hull: Maximum energy above hull in eV/atom (stability filter)
         experimental_only: If True, only return experimentally synthesized compounds
-                           (excludes theoretical/predicted structures)
 
     Returns:
         List of dicts with compound info, sorted by carbon fraction descending
@@ -102,12 +185,11 @@ def query_chemsys(
         if c_frac < min_carbon_fraction:
             continue
 
-        # Must be a true ternary (or at least contain elements beyond just C)
+        # Must contain at least 2 elements (not pure C)
         n_elements = len(comp.elements)
         if n_elements < 2:
             continue
 
-        # Compute carbon weight fraction as well
         c_wt_frac = comp.get_wt_fraction("C")
 
         spacegroup = ""
@@ -138,39 +220,42 @@ def query_chemsys(
 def screen_systems(
     api_key: str,
     systems: Optional[list[str]] = None,
+    mode: str = "ternary",
     metal_group: Optional[str] = None,
-    nonmetal: Optional[str] = None,
+    partner_group: Optional[str] = None,
+    partner_elements: Optional[list[str]] = None,
     min_carbon_fraction: float = 0.2,
     max_energy_above_hull: float = 0.1,
     experimental_only: bool = False,
 ) -> pd.DataFrame:
     """
-    Screen multiple ternary M-X-C systems for carbon-rich compounds.
+    Screen chemical systems for carbon-rich compounds.
 
-    If `systems` is provided, query those specific systems.
-    Otherwise, generate M-X-C combinations from metal_group and nonmetal.
+    Either provide explicit `systems` list, or use `mode` + `metal_group` +
+    `partner_group`/`partner_elements` to auto-generate systems.
     """
     if systems is None:
-        if metal_group is None or nonmetal is None:
-            raise ValueError("Provide either --systems or both --metal-group and --nonmetal")
+        systems = generate_systems(mode, metal_group, partner_group, partner_elements)
 
-        metals = METAL_GROUPS.get(metal_group)
-        if metals is None:
-            raise ValueError(f"Unknown metal group: {metal_group}. Options: {list(METAL_GROUPS.keys())}")
+    print(f"Will query {len(systems)} chemical systems")
 
-        nonmetals = [nonmetal] if nonmetal != "all" else NONMETALS
-        systems = [f"{m}-{x}-C" for m, x in itertools.product(metals, nonmetals)]
-
+    # Deduplicate results by material_id (subsystems overlap between queries)
+    seen_ids = set()
     all_results = []
     with MPRester(api_key) as mpr:
         for i, sys in enumerate(systems):
             print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
             results = query_chemsys(mpr, sys, min_carbon_fraction, max_energy_above_hull, experimental_only)
-            if results:
-                print(f"  Found {len(results)} carbon-rich compounds")
-                all_results.extend(results)
+            new_count = 0
+            for r in results:
+                if r["material_id"] not in seen_ids:
+                    seen_ids.add(r["material_id"])
+                    all_results.append(r)
+                    new_count += 1
+            if new_count > 0:
+                print(f"  Found {len(results)} compounds ({new_count} new)")
             else:
-                print(f"  No carbon-rich compounds found")
+                print(f"  No new carbon-rich compounds found")
 
     df = pd.DataFrame(all_results)
     if not df.empty:
@@ -188,21 +273,41 @@ def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Screen ternary M-X-C systems for carbon-rich compounds via Materials Project API"
+        description="Screen chemical systems for carbon-rich compounds via Materials Project API"
     )
     parser.add_argument("--api-key", required=True, help="Materials Project API key")
     parser.add_argument(
         "--systems", nargs="+", default=None,
-        help="Specific chemical systems to query, e.g. La-B-C Fe-B-C"
+        help="Explicit chemical systems to query (e.g., La-B-C Hf-Ta-C La-C). Bypasses --mode"
+    )
+    parser.add_argument(
+        "--mode", default="ternary", choices=SEARCH_MODES,
+        help=(
+            "Search mode: "
+            "'binary' = M-C only; "
+            "'ternary' = M-partner-C; "
+            "'bimetal' = M1-M2-C; "
+            "'all' = binary + ternary + bimetal combined. "
+            "(default: ternary)"
+        ),
     )
     parser.add_argument(
         "--metal-group", default=None,
         choices=list(METAL_GROUPS.keys()),
-        help="Metal group for systematic screening"
+        help="Primary metal element group"
     )
     parser.add_argument(
-        "--nonmetal", default=None,
-        help=f"Non-metal partner element (or 'all' for {NONMETALS})"
+        "--partner-group", default=None,
+        choices=list(PARTNER_GROUPS.keys()),
+        help=(
+            "Partner element group for ternary/bimetal modes. "
+            "Can be a non-metal group (e.g., 'nonmetal', 'nonmetal_extended') "
+            "or a metal group (e.g., 'transition_5d') for M1-M2-C screening"
+        ),
+    )
+    parser.add_argument(
+        "--partner-elements", nargs="+", default=None,
+        help="Explicit partner elements (overrides --partner-group). E.g., --partner-elements B N Si Hf Ta"
     )
     parser.add_argument(
         "--min-c-fraction", type=float, default=0.2,
@@ -224,13 +329,16 @@ def main():
 
     print("=" * 70)
     print("Carbon-Rich Compound Screening via Materials Project")
+    print(f"Mode: {args.mode}" + (" (bypassed by --systems)" if args.systems else ""))
     print("=" * 70)
 
     df = screen_systems(
         api_key=args.api_key,
         systems=args.systems,
+        mode=args.mode,
         metal_group=args.metal_group,
-        nonmetal=args.nonmetal,
+        partner_group=args.partner_group,
+        partner_elements=args.partner_elements,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
         experimental_only=args.experimental_only,
