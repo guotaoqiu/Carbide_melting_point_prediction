@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--nonmetal", default=None)
     parser.add_argument("--min-c-fraction", type=float, default=0.25)
     parser.add_argument("--max-ehull", type=float, default=0.1)
+    parser.add_argument("--experimental-only", action="store_true",
+                        help="Only include experimentally synthesized compounds")
     parser.add_argument("--mp-min", type=float, default=2000)
     parser.add_argument("--mp-max", type=float, default=2500)
     parser.add_argument("--output-prefix", default=None, help="Prefix for output files")
@@ -120,6 +122,7 @@ def main():
         nonmetal=args.nonmetal,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
+        experimental_only=args.experimental_only,
     )
 
     if df.empty:

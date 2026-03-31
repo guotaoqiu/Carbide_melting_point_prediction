@@ -48,6 +48,7 @@ def query_chemsys(
     chemsys: str,
     min_carbon_fraction: float = 0.2,
     max_energy_above_hull: float = 0.1,  # eV/atom, for thermodynamic stability
+    experimental_only: bool = False,
 ) -> list[dict]:
     """
     Query all compounds in a chemical system, filter for C-containing phases.
@@ -57,6 +58,8 @@ def query_chemsys(
         chemsys: Chemical system string, e.g. "La-B-C"
         min_carbon_fraction: Minimum atomic fraction of carbon (0-1)
         max_energy_above_hull: Maximum energy above hull in eV/atom (stability filter)
+        experimental_only: If True, only return experimentally synthesized compounds
+                           (excludes theoretical/predicted structures)
 
     Returns:
         List of dicts with compound info, sorted by carbon fraction descending
@@ -65,22 +68,27 @@ def query_chemsys(
     if "C" not in elements:
         raise ValueError(f"System {chemsys} does not contain carbon")
 
+    search_kwargs = dict(
+        chemsys=chemsys,
+        energy_above_hull=(0, max_energy_above_hull),
+        fields=[
+            "material_id",
+            "formula_pretty",
+            "composition_reduced",
+            "energy_above_hull",
+            "formation_energy_per_atom",
+            "symmetry",
+            "volume",
+            "density",
+            "nelements",
+            "theoretical",
+        ],
+    )
+    if experimental_only:
+        search_kwargs["theoretical"] = False
+
     try:
-        docs = mpr.materials.summary.search(
-            chemsys=chemsys,
-            energy_above_hull=(0, max_energy_above_hull),
-            fields=[
-                "material_id",
-                "formula_pretty",
-                "composition_reduced",
-                "energy_above_hull",
-                "formation_energy_per_atom",
-                "symmetry",
-                "volume",
-                "density",
-                "nelements",
-            ],
-        )
+        docs = mpr.materials.summary.search(**search_kwargs)
     except Exception as e:
         print(f"  Warning: failed to query {chemsys}: {e}")
         return []
@@ -120,6 +128,7 @@ def query_chemsys(
             "spacegroup": spacegroup,
             "crystal_system": crystal_system,
             "density_g_cm3": round(doc.density, 2) if doc.density else None,
+            "theoretical": getattr(doc, "theoretical", None),
         })
 
     results.sort(key=lambda x: x["C_atomic_fraction"], reverse=True)
@@ -133,6 +142,7 @@ def screen_systems(
     nonmetal: Optional[str] = None,
     min_carbon_fraction: float = 0.2,
     max_energy_above_hull: float = 0.1,
+    experimental_only: bool = False,
 ) -> pd.DataFrame:
     """
     Screen multiple ternary M-X-C systems for carbon-rich compounds.
@@ -155,7 +165,7 @@ def screen_systems(
     with MPRester(api_key) as mpr:
         for i, sys in enumerate(systems):
             print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
-            results = query_chemsys(mpr, sys, min_carbon_fraction, max_energy_above_hull)
+            results = query_chemsys(mpr, sys, min_carbon_fraction, max_energy_above_hull, experimental_only)
             if results:
                 print(f"  Found {len(results)} carbon-rich compounds")
                 all_results.extend(results)
@@ -203,6 +213,10 @@ def main():
         help="Maximum energy above hull in eV/atom (default: 0.1, set higher for metastable phases)"
     )
     parser.add_argument(
+        "--experimental-only", action="store_true",
+        help="Only include experimentally synthesized compounds (exclude theoretical/predicted structures)"
+    )
+    parser.add_argument(
         "--output", default="carbon_rich_compounds.csv",
         help="Output CSV filename"
     )
@@ -219,6 +233,7 @@ def main():
         nonmetal=args.nonmetal,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
+        experimental_only=args.experimental_only,
     )
 
     if df.empty:
