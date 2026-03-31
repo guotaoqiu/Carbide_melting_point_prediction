@@ -27,6 +27,7 @@ Example usage:
 """
 
 import argparse
+import json
 from datetime import datetime
 
 import pandas as pd
@@ -158,7 +159,7 @@ def main():
 
     # Step 1: Query Materials Project
     print("\n[Step 1/4] Querying Materials Project for carbon-rich compounds...")
-    df = screen_systems(
+    df, stats = screen_systems(
         api_key=args.api_key,
         systems=args.systems,
         mode=args.mode,
@@ -172,6 +173,8 @@ def main():
 
     if df.empty:
         print("No compounds found. Try relaxing filters (--min-c-fraction, --max-ehull).")
+        stats.print_funnel(args.max_ehull, args.min_c_fraction,
+                           args.mp_min, args.mp_max, args.experimental_only)
         return
 
     print(f"Found {len(df)} carbon-rich compounds across {df['chemsys'].nunique()} systems")
@@ -212,6 +215,34 @@ def main():
         in_range.to_csv(range_file, index=False)
         print(f"  In mp range: {range_file} ({len(in_range)} rows)")
 
+    # ── Update stats with melting point info ─────────────────────────────
+    stats.mp_in_range = len(in_range)
+    if "mp_source" in df.columns:
+        stats.mp_source_counts = df["mp_source"].value_counts().to_dict()
+
+    # Save funnel statistics
+    stats_file = f"{prefix}_funnel_stats.json"
+    stats_dict = stats.to_dict()
+    stats_dict["parameters"] = {
+        "mode": args.mode,
+        "metal_group": args.metal_group,
+        "partner_group": args.partner_group,
+        "partner_elements": args.partner_elements,
+        "min_c_fraction": args.min_c_fraction,
+        "max_ehull": args.max_ehull,
+        "experimental_only": args.experimental_only,
+        "use_mapp": args.use_mapp,
+        "mp_min": args.mp_min,
+        "mp_max": args.mp_max,
+    }
+    with open(stats_file, "w") as f:
+        json.dump(stats_dict, f, indent=2)
+    print(f"  Funnel stats: {stats_file}")
+
+    # ── Print funnel ─────────────────────────────────────────────────────
+    stats.print_funnel(args.max_ehull, args.min_c_fraction,
+                       args.mp_min, args.mp_max, args.experimental_only)
+
     # Display top candidates
     print("\n" + "=" * 70)
     print("TOP CANDIDATES (ranked by composite score)")
@@ -237,7 +268,7 @@ def main():
     print("=" * 70)
     print("""
 1. For compounds with mp_source='empirical_estimate', verify with:
-   - MeLting GNN model: https://github.com/atomisticnet/MeLting
+   - MAPP GNN model (--use-mapp flag): https://github.com/qjhong/mapp_api
    - Literature search on specific compounds
    - CALPHAD databases (if available)
 

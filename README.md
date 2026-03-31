@@ -105,13 +105,40 @@ python run_screening.py --api-key KEY --systems La-B-C --mp-min 1800 --mp-max 22
 
 ### Output Files
 
-The script generates three CSV files (all prefixed with `--output-prefix` or a timestamp):
+The script generates four output files (all prefixed with `--output-prefix` or a timestamp):
 
 | File | Content |
 |------|---------|
 | `<prefix>_all.csv` | All compounds found, ranked by composite score |
 | `<prefix>_best_per_system.csv` | Only the highest-carbon compound per chemical system |
 | `<prefix>_in_mp_range.csv` | Compounds with melting points inside the target window |
+| `<prefix>_funnel_stats.json` | Screening funnel statistics (see below) |
+
+### Screening Funnel Statistics
+
+The script tracks how many compounds survive each screening stage and prints a funnel summary:
+
+```
+======================================================================
+SCREENING FUNNEL STATISTICS
+======================================================================
+  Chemical systems queried:          80
+  Total C-containing compounds in MP:1247
+    - Experimentally synthesized:     312
+    - Theoretical/predicted:          935
+  After experimental-only filter:     312
+  Thermodynamically stable (hull=0):  198
+  Near-stable (hull <= 0.1 eV):       267
+  Pass C fraction filter (>= 0.25):   85
+  Highest-C compound per system:      42
+  Melting point in 2000-2500 C:       18
+  Melting point sources:
+    - experimental_curated: 5
+    - mapp_gnn: 72
+    - empirical_estimate: 8
+```
+
+The funnel is also saved as JSON (`<prefix>_funnel_stats.json`) for programmatic analysis, including all filter parameters used.
 
 ### Composite Scoring
 
