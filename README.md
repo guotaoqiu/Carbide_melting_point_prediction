@@ -2,10 +2,6 @@
 
 High-throughput screening toolkit for identifying carbon-rich compounds in ternary M-X-C chemical systems as candidates for graphitization catalysis research.
 
-## Background
-
-The catalytic effect of LaB6 on graphitization is believed to stem from the formation of La(BC)2 — a high-carbon borocarbide — from LaB6 at high temperature in a carbon-rich environment. As carbon precipitates, it adheres to La(BC)2 surfaces, gradually forming graphite. This toolkit systematically finds the **highest-carbon-content compound** in each ternary system with melting points in a target range (default: 2000-2500 C), replacing the inefficient manual browsing of Materials Project phase diagrams.
-
 ## Installation
 
 ```bash
