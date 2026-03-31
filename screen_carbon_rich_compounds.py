@@ -65,52 +65,54 @@ SEARCH_MODES = ["binary", "ternary", "bimetal", "all"]
 
 @dataclass
 class ScreeningStats:
-    """Track compound counts at each stage of the screening funnel."""
+    """Track compound counts at each stage of the screening funnel.
+
+    All counts are from the SAME query (with API-level filters applied).
+    No extra API calls are made — we just count as we apply each client-side filter.
+    """
     systems_queried: int = 0
-    total_in_systems: int = 0         # all compounds returned from MP (C-containing)
+    total_returned: int = 0           # C-containing compounds returned from MP query
     experimental: int = 0             # subset that are experimentally synthesized
     theoretical: int = 0              # subset that are theoretical/predicted
-    stable: int = 0                   # e_above_hull == 0
-    near_stable: int = 0              # e_above_hull <= max_ehull threshold
+    stable_on_hull: int = 0           # e_above_hull == 0
     pass_carbon_filter: int = 0       # meet min carbon fraction
     highest_c_per_system: int = 0     # best compound per system
-    # These are filled later by run_screening.py
+    # These are filled later by run_screening.py after melting point annotation
     mp_in_range: int = 0              # melting point in target window
     mp_source_counts: dict = field(default_factory=dict)
 
-    def print_funnel(self, max_ehull: float, min_c_frac: float,
+    def print_funnel(self, min_c_frac: float, max_ehull: float,
                      mp_min: float = 0, mp_max: float = 0,
                      experimental_only: bool = False):
         """Print a visual funnel summary."""
         print("\n" + "=" * 70)
         print("SCREENING FUNNEL STATISTICS")
         print("=" * 70)
-        print(f"  Chemical systems queried:          {self.systems_queried}")
-        print(f"  Total C-containing compounds in MP:{self.total_in_systems}")
-        print(f"    - Experimentally synthesized:     {self.experimental}")
-        print(f"    - Theoretical/predicted:          {self.theoretical}")
-        if experimental_only:
-            print(f"  After experimental-only filter:     {self.experimental}")
-        print(f"  Thermodynamically stable (hull=0):  {self.stable}")
-        print(f"  Near-stable (hull <= {max_ehull} eV):      {self.near_stable}")
-        print(f"  Pass C fraction filter (>= {min_c_frac}):  {self.pass_carbon_filter}")
-        print(f"  Highest-C compound per system:      {self.highest_c_per_system}")
+        print(f"  Chemical systems queried:             {self.systems_queried}")
+        print(f"  C-containing compounds from MP:       {self.total_returned}")
+        print(f"    - Experimentally synthesized:        {self.experimental}")
+        print(f"    - Theoretical/predicted:             {self.theoretical}")
+        print(f"  Stable on convex hull (e_hull = 0):   {self.stable_on_hull}")
+        print(f"  Pass C fraction filter (>= {min_c_frac}):    {self.pass_carbon_filter}")
+        print(f"  Highest-C compound per system:        {self.highest_c_per_system}")
         if mp_min > 0 or mp_max > 0:
-            print(f"  Melting point in {mp_min}-{mp_max} C:     {self.mp_in_range}")
+            print(f"  Melting point in {mp_min}-{mp_max} C:       {self.mp_in_range}")
         if self.mp_source_counts:
             print(f"  Melting point sources:")
             for src, count in sorted(self.mp_source_counts.items()):
                 print(f"    - {src}: {count}")
+        if experimental_only:
+            print(f"\n  Note: --experimental-only was ON, theoretical compounds excluded at API level")
+        print(f"  Note: stability filter e_hull <= {max_ehull} eV/atom applied at API level")
 
     def to_dict(self) -> dict:
         """Convert to dict for CSV/JSON export."""
         d = {
             "systems_queried": self.systems_queried,
-            "total_C_compounds_in_MP": self.total_in_systems,
+            "total_C_compounds_from_MP": self.total_returned,
             "experimental_synthesized": self.experimental,
             "theoretical_predicted": self.theoretical,
-            "stable_on_hull": self.stable,
-            "near_stable": self.near_stable,
+            "stable_on_hull": self.stable_on_hull,
             "pass_carbon_filter": self.pass_carbon_filter,
             "highest_C_per_system": self.highest_c_per_system,
             "mp_in_range": self.mp_in_range,
@@ -185,35 +187,42 @@ def generate_systems(
     return sorted(systems)
 
 
-def query_chemsys_raw(
+def query_chemsys(
     mpr: MPRester,
     chemsys: str,
+    max_energy_above_hull: float = 0.1,
+    experimental_only: bool = False,
 ) -> list[dict]:
     """
-    Query ALL compounds in a chemical system from Materials Project.
+    Query compounds in a chemical system from Materials Project.
 
-    No filtering applied — returns everything so we can count the funnel.
+    Applies stability and experimental filters at the API level to minimize data transfer.
     """
     elements = chemsys.split("-")
     if "C" not in elements:
         raise ValueError(f"System {chemsys} does not contain carbon")
 
+    search_kwargs = dict(
+        chemsys=chemsys,
+        energy_above_hull=(0, max_energy_above_hull),
+        fields=[
+            "material_id",
+            "formula_pretty",
+            "composition_reduced",
+            "energy_above_hull",
+            "formation_energy_per_atom",
+            "symmetry",
+            "volume",
+            "density",
+            "nelements",
+            "theoretical",
+        ],
+    )
+    if experimental_only:
+        search_kwargs["theoretical"] = False
+
     try:
-        docs = mpr.materials.summary.search(
-            chemsys=chemsys,
-            fields=[
-                "material_id",
-                "formula_pretty",
-                "composition_reduced",
-                "energy_above_hull",
-                "formation_energy_per_atom",
-                "symmetry",
-                "volume",
-                "density",
-                "nelements",
-                "theoretical",
-            ],
-        )
+        docs = mpr.materials.summary.search(**search_kwargs)
     except Exception as e:
         print(f"  Warning: failed to query {chemsys}: {e}")
         return []
@@ -223,7 +232,7 @@ def query_chemsys_raw(
         comp = doc.composition_reduced
         c_frac = comp.get_atomic_fraction("C")
 
-        # Must contain carbon (skip pure metals, binary non-C phases, etc.)
+        # Must contain carbon
         if c_frac == 0:
             continue
 
@@ -272,7 +281,11 @@ def screen_systems(
     """
     Screen chemical systems for carbon-rich compounds.
 
-    Returns both the filtered DataFrame and funnel statistics.
+    Uses the same filtered API query as before (no extra calls).
+    Counts are tracked at each client-side filtering step.
+
+    Returns:
+        (filtered_df, stats) tuple
     """
     if systems is None:
         systems = generate_systems(mode, metal_group, partner_group, partner_elements)
@@ -281,57 +294,44 @@ def screen_systems(
     stats.systems_queried = len(systems)
     print(f"Will query {len(systems)} chemical systems")
 
-    # Collect all raw results, deduplicate by material_id
+    # Collect results with API-level filters, deduplicate by material_id
     seen_ids = set()
-    all_raw = []
+    all_results = []
     with MPRester(api_key) as mpr:
         for i, sys in enumerate(systems):
             print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
-            raw = query_chemsys_raw(mpr, sys)
+            results = query_chemsys(mpr, sys, max_energy_above_hull, experimental_only)
             new_count = 0
-            for r in raw:
+            for r in results:
                 if r["material_id"] not in seen_ids:
                     seen_ids.add(r["material_id"])
-                    all_raw.append(r)
+                    all_results.append(r)
                     new_count += 1
             if new_count > 0:
-                print(f"  Found {len(raw)} C-containing compounds ({new_count} new)")
+                print(f"  Found {len(results)} compounds ({new_count} new)")
             else:
-                print(f"  No new C-containing compounds")
+                print(f"  No new compounds found")
 
-    if not all_raw:
+    if not all_results:
         return pd.DataFrame(), stats
 
-    df_raw = pd.DataFrame(all_raw)
+    df = pd.DataFrame(all_results)
 
-    # ── Count funnel stages ──────────────────────────────────────────────
-    stats.total_in_systems = len(df_raw)
-    stats.experimental = int((df_raw["theoretical"] == False).sum())  # noqa: E712
-    stats.theoretical = int((df_raw["theoretical"] == True).sum())  # noqa: E712
-    stats.stable = int((df_raw["energy_above_hull_eV"] == 0).sum())
-    stats.near_stable = int((df_raw["energy_above_hull_eV"] <= max_energy_above_hull).sum())
+    # ── Count at each step (no extra queries) ────────────────────────────
+    # Step 1: total returned from MP (after API-level stability + experimental filters)
+    stats.total_returned = len(df)
+    stats.experimental = int((df["theoretical"] == False).sum())  # noqa: E712
+    stats.theoretical = int((df["theoretical"] == True).sum())  # noqa: E712
+    stats.stable_on_hull = int((df["energy_above_hull_eV"] == 0).sum())
 
-    # ── Apply filters ────────────────────────────────────────────────────
-    df = df_raw.copy()
-
-    # Filter: experimental only
-    if experimental_only:
-        df = df[df["theoretical"] == False].reset_index(drop=True)  # noqa: E712
-
-    # Filter: stability
-    df = df[df["energy_above_hull_eV"] <= max_energy_above_hull].reset_index(drop=True)
-
-    # Filter: carbon fraction
+    # Step 2: apply carbon fraction filter (client-side)
     df = df[df["C_atomic_fraction"] >= min_carbon_fraction].reset_index(drop=True)
     stats.pass_carbon_filter = len(df)
 
-    # Sort by carbon fraction
-    if not df.empty:
-        df = df.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
-
-    # Count highest-C per system
+    # Step 3: count unique systems (= highest-C per system count)
     if not df.empty:
         stats.highest_c_per_system = df["chemsys"].nunique()
+        df = df.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
 
     return df, stats
 
@@ -419,7 +419,7 @@ def main():
 
     if df.empty:
         print("\nNo compounds found matching criteria.")
-        stats.print_funnel(args.max_ehull, args.min_c_fraction,
+        stats.print_funnel(args.min_c_fraction, args.max_ehull,
                            experimental_only=args.experimental_only)
         return
 
@@ -441,10 +441,10 @@ def main():
     print(best[display_cols].to_string(index=False))
 
     # Print funnel
-    stats.print_funnel(args.max_ehull, args.min_c_fraction,
+    stats.print_funnel(args.min_c_fraction, args.max_ehull,
                        experimental_only=args.experimental_only)
 
-    # Summary statistics
+    # Summary
     print(f"\n--- Summary ---")
     print(f"Total compounds found: {len(df)}")
     print(f"Unique systems with hits: {df['chemsys'].nunique()}")

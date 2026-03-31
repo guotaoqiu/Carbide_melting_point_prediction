@@ -116,27 +116,29 @@ The script generates four output files (all prefixed with `--output-prefix` or a
 
 ### Screening Funnel Statistics
 
-The script tracks how many compounds survive each screening stage and prints a funnel summary:
+The script tracks how many compounds survive each screening stage and prints a funnel summary. **No extra API calls** — counts are collected as each client-side filter is applied to the same query results.
 
 ```
 ======================================================================
 SCREENING FUNNEL STATISTICS
 ======================================================================
-  Chemical systems queried:          80
-  Total C-containing compounds in MP:1247
-    - Experimentally synthesized:     312
-    - Theoretical/predicted:          935
-  After experimental-only filter:     312
-  Thermodynamically stable (hull=0):  198
-  Near-stable (hull <= 0.1 eV):       267
-  Pass C fraction filter (>= 0.25):   85
-  Highest-C compound per system:      42
-  Melting point in 2000-2500 C:       18
+  Chemical systems queried:             80
+  C-containing compounds from MP:       267
+    - Experimentally synthesized:        198
+    - Theoretical/predicted:             69
+  Stable on convex hull (e_hull = 0):   198
+  Pass C fraction filter (>= 0.25):     85
+  Highest-C compound per system:        42
+  Melting point in 2000-2500 C:         18
   Melting point sources:
     - experimental_curated: 5
     - mapp_gnn: 72
     - empirical_estimate: 8
+
+  Note: stability filter e_hull <= 0.1 eV/atom applied at API level
 ```
+
+The first two counts (systems queried, compounds from MP) reflect what the MP API returns with your stability and experimental filters already applied. The remaining counts show progressive client-side filtering.
 
 The funnel is also saved as JSON (`<prefix>_funnel_stats.json`) for programmatic analysis, including all filter parameters used.
 
