@@ -23,6 +23,7 @@ pip install -r requirements.txt
 - `mp-api` >= 0.41.0 (Materials Project API client)
 - `pymatgen` >= 2024.1.1 (Python Materials Genomics)
 - `pandas` >= 2.0
+- `requests` >= 2.28 (for MAPP API calls)
 
 You also need a **Materials Project API key**. Get one free at: https://materialsproject.org/api
 
@@ -32,7 +33,7 @@ You also need a **Materials Project API key**. Get one free at: https://material
 |------|---------|
 | `run_screening.py` | **Main entry point.** Complete workflow: query MP -> annotate melting points -> rank candidates |
 | `screen_carbon_rich_compounds.py` | Step 1: Query Materials Project API for carbon-rich compounds across multiple search modes |
-| `predict_melting_point.py` | Step 2: Annotate compounds with melting point estimates (lookup + empirical) |
+| `predict_melting_point.py` | Step 2: Annotate compounds with melting point estimates (curated lookup, MAPP GNN, or empirical) |
 | `requirements.txt` | Python dependencies |
 
 ---
@@ -60,6 +61,8 @@ python run_screening.py --api-key YOUR_KEY [OPTIONS]
 | `--min-c-fraction` | No | `0.25` | Minimum carbon atomic fraction (0 to 1). Compounds below this threshold are excluded |
 | `--max-ehull` | No | `0.1` | Maximum energy above convex hull in eV/atom. Controls thermodynamic stability filter. Increase (e.g., `0.3`) to include metastable phases |
 | `--experimental-only` | No | `False` | Only include experimentally synthesized compounds (excludes theoretical/predicted structures from MP) |
+| `--use-mapp` | No | `False` | Enable MAPP GNN melting point predictions (Hong et al., PNAS 2022). Requires internet. See [MAPP GNN Predictions](#mapp-gnn-predictions) |
+| `--mapp-url` | No | `http://206.207.50.58:5007/...` | Custom MAPP API endpoint URL (only needed if self-hosting the MAPP server) |
 | `--mp-min` | No | `2000` | Minimum melting point filter in degrees C |
 | `--mp-max` | No | `2500` | Maximum melting point filter in degrees C |
 | `--output-prefix` | No | `screening_<timestamp>` | Prefix for output CSV filenames |
@@ -69,6 +72,10 @@ python run_screening.py --api-key YOUR_KEY [OPTIONS]
 ```bash
 # Full search: binary + ternary + bimetal for rare earths with non-metal partners
 python run_screening.py --api-key KEY --mode all --metal-group rare_earth --partner-group nonmetal
+
+# Same but with MAPP GNN melting point predictions
+python run_screening.py --api-key KEY --mode all --metal-group rare_earth \
+    --partner-group nonmetal --use-mapp
 
 # Just binary rare earth carbides (M-C only, no partner needed)
 python run_screening.py --api-key KEY --mode binary --metal-group rare_earth
@@ -88,9 +95,9 @@ python run_screening.py --api-key KEY --mode ternary --metal-group rare_earth --
 # Specific systems (bypasses --mode entirely)
 python run_screening.py --api-key KEY --systems La-B-C Hf-Ta-C La-C Ce-B-C
 
-# Only experimentally known, broader stability window
+# Only experimentally known, broader stability window, with ML melting points
 python run_screening.py --api-key KEY --mode all --metal-group transition_3d \
-    --partner-group nonmetal --experimental-only --max-ehull 0.3
+    --partner-group nonmetal --experimental-only --max-ehull 0.3 --use-mapp
 
 # Custom melting point window
 python run_screening.py --api-key KEY --systems La-B-C --mp-min 1800 --mp-max 2200
@@ -187,10 +194,11 @@ The output CSV contains the following columns:
 
 ## predict_melting_point.py
 
-**Melting point annotation module.** Since Materials Project does not store melting points, this module provides estimation through two strategies:
+**Melting point annotation module.** Since Materials Project does not store melting points, this module provides three estimation strategies (in priority order):
 
 1. **Curated lookup** — hardcoded experimental melting points for ~40 common carbides, borides, borocarbides, and related compounds (from ASM International, NIST, published literature).
-2. **Empirical estimation** — rough correlation from formation energy: `T_m ~ 1500 + 2500 * |DeltaH_f|`, with corrections for element count and density. Use as a first-pass filter only (R2 ~ 0.5).
+2. **MAPP GNN prediction** (opt-in via `--use-mapp`) — Hong et al.'s GNN+ResNet ensemble model that predicts melting temperature from chemical formula alone. Uses a remote API server. Returns prediction + uncertainty (standard error from 30-model ensemble). Supports compounds with up to 6 elements.
+3. **Empirical estimation** (fallback) — rough correlation from formation energy: `T_m ~ 1500 + 2500 * |DeltaH_f|`, with corrections for element count and density. Use as last-resort only (R2 ~ 0.5).
 
 ### Usage (standalone)
 
@@ -204,28 +212,34 @@ python predict_melting_point.py --input INPUT_CSV [OPTIONS]
 |------|----------|---------|-------------|
 | `--input` | Yes | — | Input CSV file (output from `screen_carbon_rich_compounds.py`) |
 | `--output` | No | `compounds_with_mp.csv` | Output CSV with melting point annotations added |
+| `--use-mapp` | No | `False` | Enable MAPP GNN melting point predictions. Requires internet access. See [MAPP GNN Predictions](#mapp-gnn-predictions) |
+| `--mapp-url` | No | `http://206.207.50.58:5007/...` | Custom MAPP API endpoint URL (only needed if self-hosting) |
 | `--mp-min` | No | `2000` | Minimum melting point for filtering (degrees C) |
 | `--mp-max` | No | `2500` | Maximum melting point for filtering (degrees C) |
 
 ### Examples
 
 ```bash
-# Annotate and filter to default 2000-2500 C range
+# Default: curated lookup + empirical fallback (no internet needed)
 python predict_melting_point.py --input carbon_rich_compounds.csv
 
-# Custom melting point window
+# Enable MAPP GNN predictions for compounds not in curated database
+python predict_melting_point.py --input carbon_rich_compounds.csv --use-mapp
+
+# Custom melting point window + MAPP
 python predict_melting_point.py --input carbon_rich_compounds.csv \
-    --mp-min 1800 --mp-max 3000 --output high_mp_compounds.csv
+    --use-mapp --mp-min 1800 --mp-max 3000 --output high_mp_compounds.csv
 ```
 
 ### Output Columns (added)
 
-Two columns are appended to the input CSV:
+Three columns are appended to the input CSV:
 
 | Column | Description |
 |--------|-------------|
 | `melting_point_C` | Estimated or looked-up melting point in degrees C |
-| `mp_source` | Source of the value: `experimental_curated` or `empirical_estimate` |
+| `mp_source` | Source: `experimental_curated`, `mapp_gnn`, or `empirical_estimate` |
+| `mp_std_error_C` | Standard error of prediction in degrees C (only for `mapp_gnn` source, null otherwise) |
 
 ### Curated Melting Point Database
 
@@ -241,13 +255,67 @@ The built-in lookup table currently covers:
 
 To add new entries, edit the `KNOWN_MELTING_POINTS` dictionary in `predict_melting_point.py`.
 
-### For More Accurate Predictions
+---
 
-The empirical estimate is a rough heuristic. For production-quality predictions, consider:
+## MAPP GNN Predictions
 
-- **MeLting GNN model** (Hong et al., PNAS 2022): https://github.com/atomisticnet/MeLting
-- **CALPHAD databases** (e.g., SGTE, COST507) for phase diagram-based melting points
-- **Literature search** for specific compound classes
+The MAPP model (Materials-Agnostic Platform for Prediction) is from:
+
+> Hong et al., "Melting temperature prediction using a graph neural network model: From ancient minerals to new materials", *PNAS* 119(36), e2209630119 (2022).
+
+### How it works
+
+- **Model**: Ensemble of 30 GNN + ResNet models trained on ~10,000 compounds with known melting points
+- **Input**: Chemical formula only (no crystal structure needed)
+- **Output**: Predicted melting temperature (K) + standard error from ensemble disagreement
+- **Scope**: Compounds with up to 6 elements
+- **Accuracy**: The model's top predictions for highest-melting compounds are overwhelmingly carbides and nitrides, consistent with experimental knowledge. The ensemble standard error provides built-in uncertainty quantification
+
+### Architecture
+
+The MAPP model runs as a **remote API** hosted by Hong's group at ASU. The trained model weights are not publicly distributed — predictions are obtained via HTTP POST to their server.
+
+```
+Your formulas (CSV) --> HTTP POST --> MAPP server (30 GNN models) --> Predictions (K) + std error
+```
+
+### Usage
+
+```bash
+# Enable in the standalone melting point script
+python predict_melting_point.py --input compounds.csv --use-mapp
+
+# Enable in the full screening workflow
+python run_screening.py --api-key KEY --mode all --metal-group rare_earth \
+    --partner-group nonmetal --use-mapp
+
+# Use a self-hosted MAPP server
+python predict_melting_point.py --input compounds.csv --use-mapp \
+    --mapp-url http://your-server:5007/MT_ML_Qijun_Hong_Predict_noNN
+```
+
+### Priority order
+
+When `--use-mapp` is enabled, melting points are determined in this order:
+1. **Curated lookup** — if the formula is in our hardcoded database, use the experimental value (most reliable)
+2. **MAPP GNN** — for all other formulas, query the MAPP API (ML prediction with uncertainty)
+3. **Empirical estimate** — only if MAPP fails (server down, formula too complex, etc.)
+
+Without `--use-mapp`, step 2 is skipped and the empirical fallback is used directly.
+
+### Caveats
+
+- Requires internet access to reach the MAPP API server (`http://206.207.50.58:5007`)
+- The server may be temporarily unavailable — the script retries 3 times with exponential backoff
+- Predictions are batched (500 formulas per request) to avoid timeouts
+- The MAPP model was trained primarily on binary/ternary compounds; predictions for quaternary+ systems may have larger errors
+- Always check the `mp_std_error_C` column — large standard errors (>200 deg C) indicate low model confidence
+
+### MAPP API Reference
+
+- **Paper**: https://www.pnas.org/doi/10.1073/pnas.2209630119
+- **GitHub**: https://github.com/qjhong/mapp_api
+- **Group page**: https://faculty.engineering.asu.edu/hong/melting-temperature-predictor/
 
 ---
 
@@ -314,27 +382,29 @@ The `--partner-group` flag selects elements to pair with the primary metals. It 
 ## Typical Workflow
 
 ```
-1. Start broad — screen everything for your metal group:
+1. Start broad — screen everything for your metal group with ML melting points:
    python run_screening.py --api-key KEY --mode all --metal-group rare_earth \
-       --partner-group nonmetal --experimental-only
+       --partner-group nonmetal --experimental-only --use-mapp
 
 2. Review the output CSVs:
    - *_best_per_system.csv  ->  one top compound per system
    - *_in_mp_range.csv      ->  compounds in your 2000-2500 C window
+   - Check mp_source column:  experimental_curated > mapp_gnn > empirical_estimate
+   - Check mp_std_error_C:    large values (>200) = low confidence
 
 3. Drill into interesting bimetal systems:
    python run_screening.py --api-key KEY --mode bimetal --metal-group rare_earth \
-       --partner-group transition_5d --max-ehull 0.3
+       --partner-group transition_5d --max-ehull 0.3 --use-mapp
 
-4. For compounds with mp_source='empirical_estimate':
-   - Cross-check with literature
-   - Run through MeLting GNN model for better predictions
-   - Consult CALPHAD phase diagrams
-
-5. For promising candidates, verify:
+4. For high-confidence candidates, verify:
    - Phase stability at your target processing temperature
    - Carbon precipitation behavior on cooling
    - Compatibility with your carbon matrix
+   - Cross-check MAPP predictions with literature where possible
+
+5. For low-confidence predictions (large std error or empirical_estimate):
+   - Search literature for specific compound melting points
+   - Consult CALPHAD databases (e.g., SGTE, COST507)
 ```
 
 ---
@@ -342,6 +412,7 @@ The `--partner-group` flag selects elements to pair with the primary metals. It 
 ## References
 
 - Hong et al., "Melting temperature prediction using a graph neural network model", *PNAS* 119(36), e2209630119 (2022). https://www.pnas.org/doi/10.1073/pnas.2209630119
+- MAPP API GitHub: https://github.com/qjhong/mapp_api
 - ML-guided search for energetically favorable metal borocarbide ternary compounds, *Journal of Alloys and Compounds* (2025). https://www.sciencedirect.com/science/article/abs/pii/S0925838825062401
 - Rogl, P., "Phase Equilibria and Structural Chemistry within Ternary Systems: Actinide Metal-Boron-Carbon", Springer (1983).
 - Materials Project API: https://materialsproject.org/api

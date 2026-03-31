@@ -135,6 +135,11 @@ def main():
                         help="Maximum energy above hull in eV/atom (default: 0.1)")
     parser.add_argument("--experimental-only", action="store_true",
                         help="Only include experimentally synthesized compounds")
+    parser.add_argument("--use-mapp", action="store_true",
+                        help="Enable MAPP GNN melting point predictions (Hong et al., PNAS 2022). "
+                             "Requires internet access to the MAPP API server")
+    parser.add_argument("--mapp-url", default=None,
+                        help="Custom MAPP API endpoint URL (only needed if self-hosting)")
     parser.add_argument("--mp-min", type=float, default=2000,
                         help="Minimum melting point filter in degrees C (default: 2000)")
     parser.add_argument("--mp-max", type=float, default=2500,
@@ -173,7 +178,12 @@ def main():
 
     # Step 2: Annotate with melting points
     print("\n[Step 2/4] Annotating melting points...")
-    df = annotate_with_melting_points(df)
+    mapp_kwargs = {}
+    if args.use_mapp:
+        mapp_kwargs["use_mapp"] = True
+        if args.mapp_url:
+            mapp_kwargs["mapp_url"] = args.mapp_url
+    df = annotate_with_melting_points(df, **mapp_kwargs)
 
     # Step 3: Rank candidates
     print("\n[Step 3/4] Ranking candidates...")
@@ -189,7 +199,7 @@ def main():
 
     # Best per system
     best = find_highest_carbon_per_system(df)
-    best = annotate_with_melting_points(best)
+    best = annotate_with_melting_points(best, **mapp_kwargs)
     best = rank_candidates(best, args.mp_min, args.mp_max)
     best_file = f"{prefix}_best_per_system.csv"
     best.to_csv(best_file, index=False)
