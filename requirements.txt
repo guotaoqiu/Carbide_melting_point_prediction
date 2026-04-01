@@ -2,3 +2,4 @@ mp-api>=0.41.0
 pymatgen>=2024.1.1
 pandas>=2.0
 requests>=2.28
+pymongo>=4.0

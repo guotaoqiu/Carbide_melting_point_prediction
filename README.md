@@ -27,18 +27,101 @@ pip install -r requirements.txt
 
 You also need a **Materials Project API key**. Get one free at: https://materialsproject.org/api
 
+For the internal DB version, you need network access to the MongoDB server at `10.156.204.60:27017`.
+
 ## Files Overview
 
 | File | Purpose |
 |------|---------|
-| `run_screening.py` | **Main entry point.** Complete workflow: query MP -> annotate melting points -> rank candidates |
-| `screen_carbon_rich_compounds.py` | Step 1: Query Materials Project API for carbon-rich compounds across multiple search modes |
+| **Internal DB (no internet needed)** | |
+| `run_screening_internal.py` | **Recommended entry point.** Complete workflow using internal MongoDB (`opendb.mp_2022`) |
+| `screen_carbon_rich_compounds_internal.py` | Step 1: Query internal MongoDB for carbon-rich compounds |
+| **MP API (requires internet)** | |
+| `run_screening.py` | Complete workflow using Materials Project API (requires internet) |
+| `screen_carbon_rich_compounds.py` | Step 1: Query Materials Project API for carbon-rich compounds |
+| **Shared** | |
 | `predict_melting_point.py` | Step 2: Annotate compounds with melting point estimates (curated lookup, MAPP GNN, or empirical) |
 | `requirements.txt` | Python dependencies |
 
 ---
 
-## run_screening.py
+## run_screening_internal.py (Recommended)
+
+**Complete screening workflow using internal MongoDB.** No internet or MP API key needed. Queries the `opendb.mp_2022` collection (154718 entries) which mirrors Materials Project data.
+
+### Usage
+
+```bash
+python run_screening_internal.py [OPTIONS]
+```
+
+### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--systems` | No | — | Explicit chemical systems (e.g., `B-C-La C-Hf-Ta`). Note: chemsys is alphabetically sorted in DB. Bypasses `--mode` |
+| `--mode` | No | `ternary` | Search mode: `binary`, `ternary`, `bimetal`, or `all`. See [Search Modes](#search-modes) |
+| `--metal-group` | No | — | Primary metal element group. See [Metal Groups](#metal-groups) |
+| `--partner-group` | No | — | Partner element group for ternary/bimetal modes. See [Partner Groups](#partner-groups) |
+| `--partner-elements` | No | — | Explicit partner elements (overrides `--partner-group`) |
+| `--min-c-fraction` | No | `0.25` | Minimum carbon atomic fraction (0 to 1) |
+| `--max-ehull` | No | `0.1` | Maximum energy above hull in eV/atom |
+| `--experimental-only` | No | `False` | Only include experimentally synthesized compounds |
+| `--mp-min` | No | `2000` | Minimum melting point filter (degrees C) |
+| `--mp-max` | No | `2500` | Maximum melting point filter (degrees C) |
+| `--mongo-uri` | No | `mongodb://yll:Labs.147.258@10.156.204.60:27017/` | MongoDB connection URI |
+| `--db-name` | No | `opendb` | Database name |
+| `--collection` | No | `mp_2022` | Collection name |
+| `--output-prefix` | No | `screening_<timestamp>` | Prefix for output files |
+
+### Examples
+
+```bash
+# Full search: binary + ternary + bimetal for rare earths
+python run_screening_internal.py --mode all --metal-group rare_earth --partner-group nonmetal
+
+# Just binary rare earth carbides
+python run_screening_internal.py --mode binary --metal-group rare_earth
+
+# Bimetal: rare earths paired with refractory metals
+python run_screening_internal.py --mode bimetal --metal-group rare_earth --partner-group transition_5d
+
+# Specific systems (note: alphabetically sorted in DB)
+python run_screening_internal.py --systems B-C-La C-Hf-Ta C-La
+
+# Only experimental, broader stability window
+python run_screening_internal.py --mode all --metal-group transition_3d \
+    --partner-group nonmetal --experimental-only --max-ehull 0.3
+
+# Then get MAPP predictions on a machine with internet:
+python predict_melting_point.py --input screening_*_all.csv --use-mapp
+```
+
+### Output Files
+
+| File | Content |
+|------|---------|
+| `<prefix>_all.csv` | All compounds found, ranked by composite score |
+| `<prefix>_best_per_system.csv` | Highest-carbon compound per chemical system |
+| `<prefix>_in_mp_range.csv` | Compounds with melting points in target window |
+| `<prefix>_funnel_stats.json` | Screening funnel statistics |
+
+### Two-Step Workflow for MAPP Predictions
+
+Since the company network blocks external API access, use a two-step approach:
+
+1. **On company machine** (internal DB, no internet):
+   ```bash
+   python run_screening_internal.py --mode all --metal-group rare_earth --partner-group nonmetal
+   ```
+2. **On machine with internet** (MAPP API):
+   ```bash
+   python predict_melting_point.py --input screening_*_all.csv --use-mapp --output compounds_with_mapp.csv
+   ```
+
+---
+
+## run_screening.py (MP API version)
 
 **Complete screening workflow.** Combines MP API querying, melting point annotation, and candidate ranking into a single pipeline.
 
