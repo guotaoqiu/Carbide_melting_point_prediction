@@ -30,7 +30,7 @@ from pymatgen.core import Composition
 
 # ── MongoDB connection ───────────────────────────────────────────────────────
 
-MONGO_URI = "mongodb://yll:Labs.147.258@10.156.204.60:27017/"
+MONGO_URI = "mongodb://QiuGT:woshiQiuGT6%40@10.156.204.60:27017/?readPreference=primary&appname=MongoDB%20Compass&ssl=false"
 MONGO_DB = "opendb"
 MONGO_COLLECTION = "mp_2022"
 

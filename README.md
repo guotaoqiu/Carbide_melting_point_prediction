@@ -69,7 +69,7 @@ python run_screening_internal.py [OPTIONS]
 | `--experimental-only` | No | `False` | Only include experimentally synthesized compounds |
 | `--mp-min` | No | `2000` | Minimum melting point filter (degrees C) |
 | `--mp-max` | No | `2500` | Maximum melting point filter (degrees C) |
-| `--mongo-uri` | No | `mongodb://yll:Labs.147.258@10.156.204.60:27017/` | MongoDB connection URI |
+| `--mongo-uri` | No | `mongodb://QiuGT:***@10.156.204.60:27017/` | MongoDB connection URI |
 | `--db-name` | No | `opendb` | Database name |
 | `--collection` | No | `mp_2022` | Collection name |
 | `--output-prefix` | No | `screening_<timestamp>` | Prefix for output files |
