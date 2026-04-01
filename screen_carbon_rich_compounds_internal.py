@@ -9,6 +9,12 @@ The database schema matches MP 2022 with fields:
     composition_reduced, energy_above_hull, formation_energy_per_atom,
     symmetry, structure, volume, density, nsites, etc.
 
+Screening logic:
+    - Include compounds that are EITHER experimentally synthesized OR within
+      the e_above_hull threshold (or both)
+    - Rank purely by carbon atomic fraction (highest first)
+    - Experimental compounds are trusted to exist regardless of e_above_hull
+
 Usage:
     python screen_carbon_rich_compounds_internal.py --mode all --metal-group rare_earth --partner-group nonmetal
     python screen_carbon_rich_compounds_internal.py --mode binary --metal-group transition_3d
@@ -81,44 +87,43 @@ class ScreeningStats:
     systems_queried: int = 0
     total_returned: int = 0
     experimental: int = 0
-    theoretical: int = 0
+    not_experimental: int = 0
     stable_on_hull: int = 0
+    pass_stability_or_experimental: int = 0
     pass_carbon_filter: int = 0
     highest_c_per_system: int = 0
     mp_in_range: int = 0
     mp_source_counts: dict = field(default_factory=dict)
 
     def print_funnel(self, min_c_frac: float, max_ehull: float,
-                     mp_min: float = 0, mp_max: float = 0,
-                     experimental_only: bool = False):
+                     mp_min: float = 0, mp_max: float = 0):
         """Print a visual funnel summary."""
         print("\n" + "=" * 70)
         print("SCREENING FUNNEL STATISTICS")
         print("=" * 70)
-        print(f"  Chemical systems queried:             {self.systems_queried}")
-        print(f"  C-containing compounds from DB:       {self.total_returned}")
-        print(f"    - Experimentally synthesized:        {self.experimental}")
-        print(f"    - Theoretical/predicted:             {self.theoretical}")
-        print(f"  Stable on convex hull (e_hull = 0):   {self.stable_on_hull}")
-        print(f"  Pass C fraction filter (>= {min_c_frac}):    {self.pass_carbon_filter}")
-        print(f"  Highest-C compound per system:        {self.highest_c_per_system}")
+        print(f"  Chemical systems queried:                 {self.systems_queried}")
+        print(f"  C-containing compounds from DB:           {self.total_returned}")
+        print(f"    - Experimental:                          {self.experimental}")
+        print(f"    - Not experimental:                      {self.not_experimental}")
+        print(f"  Stable on convex hull (e_hull = 0):       {self.stable_on_hull}")
+        print(f"  Pass filter (experimental OR e_hull<={max_ehull}): {self.pass_stability_or_experimental}")
+        print(f"  Pass C fraction filter (>= {min_c_frac}):        {self.pass_carbon_filter}")
+        print(f"  Highest-C compound per system:            {self.highest_c_per_system}")
         if mp_min > 0 or mp_max > 0:
-            print(f"  Melting point in {mp_min}-{mp_max} C:       {self.mp_in_range}")
+            print(f"  Melting point in {mp_min}-{mp_max} C:           {self.mp_in_range}")
         if self.mp_source_counts:
             print(f"  Melting point sources:")
             for src, count in sorted(self.mp_source_counts.items()):
                 print(f"    - {src}: {count}")
-        if experimental_only:
-            print(f"\n  Note: --experimental-only was ON, theoretical compounds excluded")
-        print(f"  Note: stability filter e_hull <= {max_ehull} eV/atom applied")
 
     def to_dict(self) -> dict:
         d = {
             "systems_queried": self.systems_queried,
             "total_C_compounds_from_DB": self.total_returned,
-            "experimental_synthesized": self.experimental,
-            "theoretical_predicted": self.theoretical,
+            "experimental": self.experimental,
+            "not_experimental": self.not_experimental,
             "stable_on_hull": self.stable_on_hull,
+            "pass_stability_or_experimental": self.pass_stability_or_experimental,
             "pass_carbon_filter": self.pass_carbon_filter,
             "highest_C_per_system": self.highest_c_per_system,
             "mp_in_range": self.mp_in_range,
@@ -154,7 +159,6 @@ def generate_systems(
 
     if mode in ("binary", "all"):
         for m in metals:
-            # chemsys in DB is alphabetically sorted, e.g. "C-La" not "La-C"
             elements = sorted([m, "C"])
             systems.add("-".join(elements))
 
@@ -180,45 +184,54 @@ def generate_systems(
     return sorted(systems)
 
 
+def build_output_name(mode: str, metal_group: Optional[str],
+                      partner_group: Optional[str],
+                      partner_elements: Optional[list[str]],
+                      systems: Optional[list[str]]) -> str:
+    """Build a descriptive output filename from the search parameters."""
+    if systems:
+        # Use first and last system to make a readable name
+        sys_str = "_".join(systems[:3])
+        if len(systems) > 3:
+            sys_str += f"_etc{len(systems)}"
+        return f"carbon_rich_{sys_str}.csv"
+
+    parts = [mode]
+    if metal_group:
+        parts.append(metal_group)
+    if partner_group:
+        parts.append(partner_group)
+    elif partner_elements:
+        parts.append("-".join(partner_elements[:3]))
+
+    return f"carbon_rich_{'_'.join(parts)}.csv"
+
+
 def query_chemsys_mongo(
     col,
     chemsys: str,
-    max_energy_above_hull: float = 0.1,
-    experimental_only: bool = False,
 ) -> list[dict]:
     """
-    Query compounds in a chemical system from the internal MongoDB.
+    Query ALL C-containing compounds in a chemical system from the internal MongoDB.
 
-    The chemsys field in mp_2022 uses alphabetically sorted elements joined by "-",
-    and querying a chemsys returns exact matches AND all sub-systems.
-    We query for the exact chemsys, then also query sub-systems containing C.
+    No stability filter at the DB level — we fetch everything and filter client-side
+    so we can count the funnel properly. The chemsys field in mp_2022 uses
+    alphabetically sorted elements joined by "-".
     """
     target_elements = chemsys.split("-")
     if "C" not in target_elements:
         raise ValueError(f"System {chemsys} does not contain carbon")
 
     # Build all sub-chemsys that contain C
-    # e.g., for "B-C-La", sub-systems with C are: "C", "B-C", "C-La", "B-C-La"
     non_c_elements = [e for e in target_elements if e != "C"]
     sub_systems = set()
     for r in range(len(non_c_elements) + 1):
         for combo in itertools.combinations(non_c_elements, r):
             sub_elements = sorted(list(combo) + ["C"])
             sub_systems.add("-".join(sub_elements))
-    # Remove pure "C" — we want at least one other element
     sub_systems.discard("C")
 
-    # MongoDB query
-    query = {
-        "chemsys": {"$in": list(sub_systems)},
-        "energy_above_hull": {"$lte": max_energy_above_hull},
-    }
-
-    # The mp_2022 collection may not have a 'theoretical' field.
-    # MP marks entries as theoretical if they lack ICSD IDs.
-    # We check if the field exists before filtering.
-    if experimental_only:
-        query["theoretical"] = False
+    query = {"chemsys": {"$in": list(sub_systems)}}
 
     projection = {
         "material_id": 1,
@@ -244,7 +257,6 @@ def query_chemsys_mongo(
 
     results = []
     for doc in docs:
-        # Compute carbon fraction from composition_reduced
         comp_dict = doc.get("composition_reduced", {})
         if not comp_dict or "C" not in comp_dict:
             continue
@@ -270,6 +282,14 @@ def query_chemsys_mongo(
         ehull = doc.get("energy_above_hull")
         fe = doc.get("formation_energy_per_atom")
 
+        # Label as experimental (True) or not (False)
+        # MP uses theoretical=True for predicted structures, so experimental = NOT theoretical
+        is_theoretical = doc.get("theoretical", None)
+        if is_theoretical is not None:
+            is_experimental = not is_theoretical
+        else:
+            is_experimental = None  # unknown
+
         results.append({
             "material_id": doc.get("material_id", str(doc.get("_id", ""))),
             "formula": doc.get("formula_pretty", str(comp.reduced_formula)),
@@ -282,7 +302,7 @@ def query_chemsys_mongo(
             "spacegroup": spacegroup,
             "crystal_system": crystal_system,
             "density_g_cm3": round(doc.get("density", 0), 2) if doc.get("density") else None,
-            "theoretical": doc.get("theoretical", None),
+            "experimental": is_experimental,
         })
 
     return results
@@ -296,13 +316,18 @@ def screen_systems(
     partner_elements: Optional[list[str]] = None,
     min_carbon_fraction: float = 0.2,
     max_energy_above_hull: float = 0.1,
-    experimental_only: bool = False,
     mongo_uri: str = MONGO_URI,
     db_name: str = MONGO_DB,
     collection_name: str = MONGO_COLLECTION,
 ) -> tuple[pd.DataFrame, ScreeningStats]:
     """
     Screen chemical systems for carbon-rich compounds from internal MongoDB.
+
+    A compound passes the filter if it is:
+    - Experimentally synthesized (regardless of e_above_hull), OR
+    - Within the e_above_hull threshold
+
+    Then ranked purely by carbon atomic fraction (highest first).
 
     Returns:
         (filtered_df, stats) tuple
@@ -321,7 +346,7 @@ def screen_systems(
     all_results = []
     for i, sys in enumerate(systems):
         print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
-        results = query_chemsys_mongo(col, sys, max_energy_above_hull, experimental_only)
+        results = query_chemsys_mongo(col, sys)
         new_count = 0
         for r in results:
             if r["material_id"] not in seen_ids:
@@ -338,76 +363,37 @@ def screen_systems(
 
     df = pd.DataFrame(all_results)
 
-    # ── Count at each step ───────────────────────────────────────────────
+    # ── Count funnel stages ──────────────────────────────────────────────
     stats.total_returned = len(df)
-    if "theoretical" in df.columns:
-        stats.experimental = int((df["theoretical"] == False).sum())  # noqa: E712
-        stats.theoretical = int((df["theoretical"] == True).sum())  # noqa: E712
-    else:
-        # If theoretical field doesn't exist, all are from MP so count as unknown
-        stats.experimental = len(df)
-        stats.theoretical = 0
+    if "experimental" in df.columns:
+        stats.experimental = int((df["experimental"] == True).sum())  # noqa: E712
+        stats.not_experimental = int((df["experimental"] == False).sum())  # noqa: E712
     stats.stable_on_hull = int((df["energy_above_hull_eV"] == 0).sum())
 
-    # Apply carbon fraction filter
+    # ── Filter: experimental OR within e_hull threshold ──────────────────
+    mask_experimental = df["experimental"] == True  # noqa: E712
+    mask_stable = df["energy_above_hull_eV"] <= max_energy_above_hull
+    df = df[mask_experimental | mask_stable].reset_index(drop=True)
+    stats.pass_stability_or_experimental = len(df)
+
+    # ── Filter: carbon fraction ──────────────────────────────────────────
     df = df[df["C_atomic_fraction"] >= min_carbon_fraction].reset_index(drop=True)
     stats.pass_carbon_filter = len(df)
 
+    # ── Rank by C content (highest first) ────────────────────────────────
     if not df.empty:
-        stats.highest_c_per_system = df["chemsys"].nunique()
         df = df.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
+        stats.highest_c_per_system = df["chemsys"].nunique()
 
     return df, stats
 
 
-def find_highest_carbon_per_system(
-    df: pd.DataFrame,
-    weight_c: float = 0.7,
-    weight_stability: float = 0.3,
-) -> pd.DataFrame:
-    """For each chemsys, return the best compound by C fraction + stability.
-
-    Selection criteria (no melting point involved — that's a downstream step):
-    - Carbon atomic fraction (higher = better), weighted by weight_c
-    - Thermodynamic stability (lower e_above_hull = better), weighted by weight_stability
-
-    Args:
-        df: DataFrame with C_atomic_fraction and energy_above_hull_eV columns
-        weight_c: Weight for carbon fraction score (default 0.7)
-        weight_stability: Weight for stability score (default 0.3)
-    """
+def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
+    """For each chemsys, return the compound with the highest C atomic fraction."""
     if df.empty:
         return df
-
-    df = df.copy()
-
-    # Normalize C fraction to [0, 1]
-    c_max = df["C_atomic_fraction"].max()
-    c_min = df["C_atomic_fraction"].min()
-    if c_max > c_min:
-        df["_score_c"] = (df["C_atomic_fraction"] - c_min) / (c_max - c_min)
-    else:
-        df["_score_c"] = 1.0
-
-    # Normalize stability (invert: lower e_hull = higher score)
-    if "energy_above_hull_eV" in df.columns:
-        e_max = df["energy_above_hull_eV"].max()
-        if e_max > 0:
-            df["_score_stab"] = 1.0 - df["energy_above_hull_eV"] / e_max
-        else:
-            df["_score_stab"] = 1.0
-    else:
-        df["_score_stab"] = 0.5
-
-    df["_selection_score"] = weight_c * df["_score_c"] + weight_stability * df["_score_stab"]
-
-    # Pick the best per system
-    idx = df.groupby("chemsys")["_selection_score"].idxmax()
-    result = df.loc[idx].sort_values("_selection_score", ascending=False).reset_index(drop=True)
-
-    # Clean up temp columns
-    result = result.drop(columns=["_score_c", "_score_stab", "_selection_score"])
-    return result
+    idx = df.groupby("chemsys")["C_atomic_fraction"].idxmax()
+    return df.loc[idx].sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
 
 
 def main():
@@ -416,7 +402,7 @@ def main():
     )
     parser.add_argument(
         "--systems", nargs="+", default=None,
-        help="Explicit chemical systems to query (e.g., La-B-C Hf-Ta-C La-C). Bypasses --mode"
+        help="Explicit chemical systems to query (e.g., B-C-La C-Hf-Ta). Bypasses --mode"
     )
     parser.add_argument(
         "--mode", default="ternary", choices=SEARCH_MODES,
@@ -438,17 +424,20 @@ def main():
                         help="Minimum carbon atomic fraction (default: 0.2)")
     parser.add_argument("--max-ehull", type=float, default=0.1,
                         help="Maximum energy above hull in eV/atom (default: 0.1)")
-    parser.add_argument("--experimental-only", action="store_true",
-                        help="Only include experimentally synthesized compounds")
     parser.add_argument("--mongo-uri", default=MONGO_URI,
-                        help=f"MongoDB connection URI (default: {MONGO_URI})")
+                        help="MongoDB connection URI")
     parser.add_argument("--db-name", default=MONGO_DB,
                         help=f"Database name (default: {MONGO_DB})")
     parser.add_argument("--collection", default=MONGO_COLLECTION,
                         help=f"Collection name (default: {MONGO_COLLECTION})")
-    parser.add_argument("--output", default="carbon_rich_compounds.csv",
-                        help="Output CSV filename")
+    parser.add_argument("--output", default=None,
+                        help="Output CSV filename (auto-generated if not specified)")
     args = parser.parse_args()
+
+    # Auto-generate output filename from search parameters
+    output = args.output or build_output_name(
+        args.mode, args.metal_group, args.partner_group,
+        args.partner_elements, args.systems)
 
     print("=" * 70)
     print("Carbon-Rich Compound Screening (Internal MongoDB)")
@@ -464,7 +453,6 @@ def main():
         partner_elements=args.partner_elements,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
-        experimental_only=args.experimental_only,
         mongo_uri=args.mongo_uri,
         db_name=args.db_name,
         collection_name=args.collection,
@@ -472,17 +460,16 @@ def main():
 
     if df.empty:
         print("\nNo compounds found matching criteria.")
-        stats.print_funnel(args.min_c_fraction, args.max_ehull,
-                           experimental_only=args.experimental_only)
+        stats.print_funnel(args.min_c_fraction, args.max_ehull)
         return
 
     # Save full results
-    df.to_csv(args.output, index=False)
-    print(f"\nFull results saved to {args.output} ({len(df)} compounds)")
+    df.to_csv(output, index=False)
+    print(f"\nFull results saved to {output} ({len(df)} compounds)")
 
     # Highest-carbon per system
     best = find_highest_carbon_per_system(df)
-    best_file = args.output.replace(".csv", "_best_per_system.csv")
+    best_file = output.replace(".csv", "_best_per_system.csv")
     best.to_csv(best_file, index=False)
     print(f"Best per system saved to {best_file} ({len(best)} systems)")
 
@@ -490,11 +477,10 @@ def main():
     print("Top carbon-rich compounds (highest C fraction per system):")
     print("=" * 70)
     display_cols = ["formula", "chemsys", "C_atomic_fraction", "C_weight_fraction",
-                    "energy_above_hull_eV", "material_id"]
+                    "energy_above_hull_eV", "experimental", "material_id"]
     print(best[display_cols].to_string(index=False))
 
-    stats.print_funnel(args.min_c_fraction, args.max_ehull,
-                       experimental_only=args.experimental_only)
+    stats.print_funnel(args.min_c_fraction, args.max_ehull)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,10 @@
 Complete workflow using internal MongoDB (opendb.mp_2022) instead of MP API.
 
 Step 1: Query internal DB for carbon-rich compounds (no internet needed)
-Step 2: Annotate melting points (curated lookup + empirical estimate)
-Step 3: Rank candidates
+        Include compounds that are experimental OR within e_hull threshold
+Step 2: Select best per system by highest C content
+Step 3: Annotate melting points (curated lookup + empirical, downstream only)
 Step 4: Export results + funnel stats
-
-For MAPP GNN melting point predictions, export the CSV and run predict_melting_point.py
-with --use-mapp on a machine with internet access.
 
 Example usage:
     # Full search: binary + ternary + bimetal for rare earths
@@ -22,14 +20,13 @@ Example usage:
 
 import argparse
 import json
-from datetime import datetime
 
 import pandas as pd
 
 from screen_carbon_rich_compounds_internal import (
     METAL_GROUPS, PARTNER_GROUPS, SEARCH_MODES,
     MONGO_URI, MONGO_DB, MONGO_COLLECTION,
-    screen_systems, find_highest_carbon_per_system,
+    screen_systems, find_highest_carbon_per_system, build_output_name,
 )
 from predict_melting_point import annotate_with_melting_points, filter_by_melting_point
 
@@ -56,23 +53,24 @@ def main():
                         help="Minimum carbon atomic fraction (default: 0.25)")
     parser.add_argument("--max-ehull", type=float, default=0.1,
                         help="Maximum energy above hull in eV/atom (default: 0.1)")
-    parser.add_argument("--experimental-only", action="store_true",
-                        help="Only include experimentally synthesized compounds")
     parser.add_argument("--mp-min", type=float, default=2000,
                         help="Minimum melting point filter in degrees C (default: 2000)")
     parser.add_argument("--mp-max", type=float, default=2500,
                         help="Maximum melting point filter in degrees C (default: 2500)")
     parser.add_argument("--mongo-uri", default=MONGO_URI,
-                        help=f"MongoDB URI (default: {MONGO_URI})")
+                        help="MongoDB URI")
     parser.add_argument("--db-name", default=MONGO_DB,
                         help=f"Database name (default: {MONGO_DB})")
     parser.add_argument("--collection", default=MONGO_COLLECTION,
                         help=f"Collection name (default: {MONGO_COLLECTION})")
-    parser.add_argument("--output-prefix", default=None, help="Prefix for output files")
+    parser.add_argument("--output-prefix", default=None,
+                        help="Prefix for output files (auto-generated if not specified)")
     args = parser.parse_args()
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = args.output_prefix or f"screening_{timestamp}"
+    # Auto-generate prefix from search parameters
+    prefix = args.output_prefix or build_output_name(
+        args.mode, args.metal_group, args.partner_group,
+        args.partner_elements, args.systems).replace(".csv", "")
 
     print("=" * 70)
     print("Graphitization Catalyst Candidate Screening (Internal DB)")
@@ -83,6 +81,7 @@ def main():
 
     # Step 1: Query internal MongoDB
     print("\n[Step 1/4] Querying internal MongoDB for carbon-rich compounds...")
+    print("  Filter: experimental OR e_hull <= threshold")
     df, stats = screen_systems(
         systems=args.systems,
         mode=args.mode,
@@ -91,7 +90,6 @@ def main():
         partner_elements=args.partner_elements,
         min_carbon_fraction=args.min_c_fraction,
         max_energy_above_hull=args.max_ehull,
-        experimental_only=args.experimental_only,
         mongo_uri=args.mongo_uri,
         db_name=args.db_name,
         collection_name=args.collection,
@@ -100,17 +98,16 @@ def main():
     if df.empty:
         print("No compounds found. Try relaxing filters (--min-c-fraction, --max-ehull).")
         stats.print_funnel(args.min_c_fraction, args.max_ehull,
-                           args.mp_min, args.mp_max, args.experimental_only)
+                           args.mp_min, args.mp_max)
         return
 
     print(f"Found {len(df)} carbon-rich compounds across {df['chemsys'].nunique()} systems")
 
-    # Step 2: Select best per system (by C fraction + stability only, NOT melting point)
-    print("\n[Step 2/4] Selecting best compound per system (C content + stability)...")
+    # Step 2: Select best per system (by highest C content only)
+    print("\n[Step 2/4] Selecting best compound per system (highest C content)...")
     best = find_highest_carbon_per_system(df)
 
-    # Step 3: Annotate with melting points (curated + empirical, no MAPP here)
-    # This is a downstream prediction step — it does NOT influence the selection above
+    # Step 3: Annotate with melting points (downstream, does NOT affect selection)
     print("\n[Step 3/4] Annotating melting points (curated lookup + empirical)...")
     df = annotate_with_melting_points(df)
     best = annotate_with_melting_points(best)
@@ -147,7 +144,6 @@ def main():
         "partner_elements": args.partner_elements,
         "min_c_fraction": args.min_c_fraction,
         "max_ehull": args.max_ehull,
-        "experimental_only": args.experimental_only,
         "mp_min": args.mp_min,
         "mp_max": args.mp_max,
         "database": f"{args.db_name}.{args.collection}",
@@ -158,40 +154,27 @@ def main():
 
     # Print funnel
     stats.print_funnel(args.min_c_fraction, args.max_ehull,
-                       args.mp_min, args.mp_max, args.experimental_only)
+                       args.mp_min, args.mp_max)
 
-    # Display all compounds (sorted by C fraction)
+    # Display results
     print("\n" + "=" * 70)
-    print("ALL SCREENED COMPOUNDS (sorted by C content)")
+    print("ALL SCREENED COMPOUNDS (ranked by C content)")
     print("=" * 70)
     display_cols = [
         "formula", "chemsys", "C_atomic_fraction", "C_weight_fraction",
-        "energy_above_hull_eV", "melting_point_C", "mp_source", "material_id",
+        "energy_above_hull_eV", "experimental", "melting_point_C", "mp_source",
+        "material_id",
     ]
     cols = [c for c in display_cols if c in df.columns]
     print(df[cols].head(20).to_string(index=False))
 
-    # Best per system (selected by C content + stability, NOT melting point)
     print("\n" + "=" * 70)
-    print("BEST COMPOUND PER SYSTEM (by C content + stability)")
+    print("BEST COMPOUND PER SYSTEM (highest C content)")
     print("=" * 70)
     cols_best = ["formula", "chemsys", "C_atomic_fraction", "energy_above_hull_eV",
-                 "melting_point_C", "mp_source"]
+                 "experimental", "melting_point_C", "mp_source"]
     cols_best = [c for c in cols_best if c in best.columns]
     print(best[cols_best].to_string(index=False))
-
-    print("\n" + "=" * 70)
-    print("NEXT STEPS")
-    print("=" * 70)
-    print(f"""
-To get MAPP GNN melting point predictions, take the CSV to a machine
-with internet access and run:
-
-    python predict_melting_point.py --input {full_file} --use-mapp
-
-This will query the MAPP API for ML-based melting point predictions
-for all compounds without curated experimental values.
-""")
 
 
 if __name__ == "__main__":

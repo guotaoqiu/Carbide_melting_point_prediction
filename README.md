@@ -66,7 +66,7 @@ python run_screening_internal.py [OPTIONS]
 | `--partner-elements` | No | — | Explicit partner elements (overrides `--partner-group`) |
 | `--min-c-fraction` | No | `0.25` | Minimum carbon atomic fraction (0 to 1) |
 | `--max-ehull` | No | `0.1` | Maximum energy above hull in eV/atom |
-| `--experimental-only` | No | `False` | Only include experimentally synthesized compounds |
+| | | | *Experimental compounds always included; `--max-ehull` filters non-experimental only* |
 | `--mp-min` | No | `2000` | Minimum melting point filter (degrees C) |
 | `--mp-max` | No | `2500` | Maximum melting point filter (degrees C) |
 | `--mongo-uri` | No | `mongodb://QiuGT:***@10.156.204.60:27017/` | MongoDB connection URI |
@@ -91,7 +91,7 @@ python run_screening_internal.py --systems B-C-La C-Hf-Ta C-La
 
 # Only experimental, broader stability window
 python run_screening_internal.py --mode all --metal-group transition_3d \
-    --partner-group nonmetal --experimental-only --max-ehull 0.3
+    --partner-group nonmetal --max-ehull 0.3
 
 # Then get MAPP predictions on a machine with internet:
 python predict_melting_point.py --input screening_*_all.csv --use-mapp
@@ -143,7 +143,7 @@ python run_screening.py --api-key YOUR_KEY [OPTIONS]
 | `--partner-elements` | No | — | Explicit partner elements, space-separated (overrides `--partner-group`). E.g., `B N Si Hf Ta` |
 | `--min-c-fraction` | No | `0.25` | Minimum carbon atomic fraction (0 to 1). Compounds below this threshold are excluded |
 | `--max-ehull` | No | `0.1` | Maximum energy above convex hull in eV/atom. Controls thermodynamic stability filter. Increase (e.g., `0.3`) to include metastable phases |
-| `--experimental-only` | No | `False` | Only include experimentally synthesized compounds (excludes theoretical/predicted structures from MP) |
+| | | | *Note: experimental compounds are always included regardless of e_hull; `--max-ehull` only filters non-experimental compounds* |
 | `--use-mapp` | No | `False` | Enable MAPP GNN melting point predictions (Hong et al., PNAS 2022). Requires internet. See [MAPP GNN Predictions](#mapp-gnn-predictions) |
 | `--mapp-url` | No | `http://206.207.50.58:5007/...` | Custom MAPP API endpoint URL (only needed if self-hosting the MAPP server) |
 | `--mp-min` | No | `2000` | Minimum melting point filter in degrees C |
@@ -180,7 +180,7 @@ python run_screening.py --api-key KEY --systems La-B-C Hf-Ta-C La-C Ce-B-C
 
 # Only experimentally known, broader stability window, with ML melting points
 python run_screening.py --api-key KEY --mode all --metal-group transition_3d \
-    --partner-group nonmetal --experimental-only --max-ehull 0.3 --use-mapp
+    --partner-group nonmetal --max-ehull 0.3 --use-mapp
 
 # Custom melting point window
 python run_screening.py --api-key KEY --systems La-B-C --mp-min 1800 --mp-max 2200
@@ -225,16 +225,20 @@ The first two counts (systems queried, compounds from MP) reflect what the MP AP
 
 The funnel is also saved as JSON (`<prefix>_funnel_stats.json`) for programmatic analysis, including all filter parameters used.
 
-### Best-Per-System Selection
+### Screening Logic
 
-The best compound per system is selected by **C content + thermodynamic stability only**. Melting point is NOT used for selection — it is a downstream prediction step.
+Compounds pass the filter if they are **experimentally synthesized** (trusted to exist, regardless of e_hull) **OR** within the `--max-ehull` stability threshold. Then ranked purely by **carbon atomic fraction** (highest first).
 
-| Component | Weight | Meaning |
-|-----------|--------|---------|
-| Carbon atomic fraction | 0.7 | Higher C content = more C available for graphite precipitation |
-| Thermodynamic stability | 0.3 | Lower energy above hull = more likely to actually form |
+The best compound per system is simply the one with the **highest C content**. Melting points are annotated AFTER selection as a downstream prediction step — they do not influence which compound is chosen.
 
-Melting points are annotated AFTER selection, so you can filter the results by mp range without it biasing which compound was chosen as "best" per system.
+### Output Filenames
+
+Output filenames are auto-generated from the search parameters:
+- `carbon_rich_ternary_rare_earth_nonmetal_all.csv`
+- `carbon_rich_binary_transition_3d_best_per_system.csv`
+- `carbon_rich_B-C-La_C-Hf-Ta_C-La.csv` (when using `--systems`)
+
+Use `--output` or `--output-prefix` to override.
 
 ---
 
@@ -260,7 +264,7 @@ python screen_carbon_rich_compounds.py --api-key YOUR_KEY [OPTIONS]
 | `--partner-elements` | No | — | Explicit partner elements (overrides `--partner-group`). E.g., `--partner-elements B N Si Hf Ta` |
 | `--min-c-fraction` | No | `0.2` | Minimum carbon atomic fraction (0 to 1) |
 | `--max-ehull` | No | `0.1` | Maximum energy above hull in eV/atom. Set higher (e.g., `0.3`) for metastable phases |
-| `--experimental-only` | No | `False` | Only return experimentally synthesized compounds. Uses MP API `theoretical=False` filter |
+| | | | *Experimental compounds always included; `--max-ehull` filters non-experimental only* |
 | `--output` | No | `carbon_rich_compounds.csv` | Output CSV filename |
 
 ### Examples
@@ -279,7 +283,7 @@ python screen_carbon_rich_compounds.py --api-key KEY --mode bimetal --metal-grou
 python screen_carbon_rich_compounds.py --api-key KEY --mode all --metal-group rare_earth --partner-group nonmetal
 
 # Explicit systems
-python screen_carbon_rich_compounds.py --api-key KEY --systems La-C La-B-C Hf-Ta-C --experimental-only
+python screen_carbon_rich_compounds.py --api-key KEY --systems La-C La-B-C Hf-Ta-C
 ```
 
 ### Output Columns
@@ -299,7 +303,7 @@ The output CSV contains the following columns:
 | `spacegroup` | Space group symbol |
 | `crystal_system` | Crystal system (cubic, hexagonal, etc.) |
 | `density_g_cm3` | Density in g/cm3 |
-| `theoretical` | `True` if theoretical/predicted, `False` if experimentally observed |
+| `experimental` | `True` if experimentally synthesized, `False` if theoretical/predicted |
 
 **Note:** Results are deduplicated by `material_id` — if a compound appears in overlapping subsystems (e.g., LaC2 appears in both La-C and La-B-C queries), it is only listed once.
 
@@ -497,7 +501,7 @@ The `--partner-group` flag selects elements to pair with the primary metals. It 
 ```
 1. Start broad — screen everything for your metal group with ML melting points:
    python run_screening.py --api-key KEY --mode all --metal-group rare_earth \
-       --partner-group nonmetal --experimental-only --use-mapp
+       --partner-group nonmetal --use-mapp
 
 2. Review the output CSVs:
    - *_best_per_system.csv  ->  one top compound per system
