@@ -1,0 +1,4 @@
+CrabNet_repo/
+models/
+__pycache__/
+*.pyc
