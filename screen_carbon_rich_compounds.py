@@ -336,12 +336,43 @@ def screen_systems(
     return df, stats
 
 
-def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
-    """For each chemsys, return only the compound with highest C atomic fraction."""
+def find_highest_carbon_per_system(
+    df: pd.DataFrame,
+    weight_c: float = 0.7,
+    weight_stability: float = 0.3,
+) -> pd.DataFrame:
+    """For each chemsys, return the best compound by C fraction + stability.
+
+    Selection criteria (no melting point involved — that's a downstream step):
+    - Carbon atomic fraction (higher = better), weighted by weight_c
+    - Thermodynamic stability (lower e_above_hull = better), weighted by weight_stability
+    """
     if df.empty:
         return df
-    idx = df.groupby("chemsys")["C_atomic_fraction"].idxmax()
-    return df.loc[idx].sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
+
+    df = df.copy()
+
+    c_max = df["C_atomic_fraction"].max()
+    c_min = df["C_atomic_fraction"].min()
+    if c_max > c_min:
+        df["_score_c"] = (df["C_atomic_fraction"] - c_min) / (c_max - c_min)
+    else:
+        df["_score_c"] = 1.0
+
+    if "energy_above_hull_eV" in df.columns:
+        e_max = df["energy_above_hull_eV"].max()
+        if e_max > 0:
+            df["_score_stab"] = 1.0 - df["energy_above_hull_eV"] / e_max
+        else:
+            df["_score_stab"] = 1.0
+    else:
+        df["_score_stab"] = 0.5
+
+    df["_selection_score"] = weight_c * df["_score_c"] + weight_stability * df["_score_stab"]
+    idx = df.groupby("chemsys")["_selection_score"].idxmax()
+    result = df.loc[idx].sort_values("_selection_score", ascending=False).reset_index(drop=True)
+    result = result.drop(columns=["_score_c", "_score_stab", "_selection_score"])
+    return result
 
 
 def main():

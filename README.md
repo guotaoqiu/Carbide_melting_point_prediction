@@ -101,8 +101,8 @@ python predict_melting_point.py --input screening_*_all.csv --use-mapp
 
 | File | Content |
 |------|---------|
-| `<prefix>_all.csv` | All compounds found, ranked by composite score |
-| `<prefix>_best_per_system.csv` | Highest-carbon compound per chemical system |
+| `<prefix>_all.csv` | All compounds found, sorted by C content |
+| `<prefix>_best_per_system.csv` | Best compound per system (selected by C content + stability) |
 | `<prefix>_in_mp_range.csv` | Compounds with melting points in target window |
 | `<prefix>_funnel_stats.json` | Screening funnel statistics |
 
@@ -225,15 +225,16 @@ The first two counts (systems queried, compounds from MP) reflect what the MP AP
 
 The funnel is also saved as JSON (`<prefix>_funnel_stats.json`) for programmatic analysis, including all filter parameters used.
 
-### Composite Scoring
+### Best-Per-System Selection
 
-Candidates are ranked by a weighted composite score:
+The best compound per system is selected by **C content + thermodynamic stability only**. Melting point is NOT used for selection — it is a downstream prediction step.
 
 | Component | Weight | Meaning |
 |-----------|--------|---------|
-| Carbon atomic fraction | 0.5 | Higher C content = more C available for graphite precipitation |
-| Thermodynamic stability | 0.3 | Lower energy above hull = more likely to form |
-| Melting point proximity | 0.2 | Closer to center of target mp range = better match to process conditions |
+| Carbon atomic fraction | 0.7 | Higher C content = more C available for graphite precipitation |
+| Thermodynamic stability | 0.3 | Lower energy above hull = more likely to actually form |
+
+Melting points are annotated AFTER selection, so you can filter the results by mp range without it biasing which compound was chosen as "best" per system.
 
 ---
 

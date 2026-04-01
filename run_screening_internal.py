@@ -34,51 +34,6 @@ from screen_carbon_rich_compounds_internal import (
 from predict_melting_point import annotate_with_melting_points, filter_by_melting_point
 
 
-def rank_candidates(
-    df: pd.DataFrame,
-    mp_min: float = 2000,
-    mp_max: float = 2500,
-    weight_c_fraction: float = 0.5,
-    weight_stability: float = 0.3,
-    weight_mp_proximity: float = 0.2,
-) -> pd.DataFrame:
-    """Rank compounds by composite score (C content + stability + mp proximity)."""
-    df = df.copy()
-
-    c_max = df["C_atomic_fraction"].max()
-    c_min = df["C_atomic_fraction"].min()
-    if c_max > c_min:
-        df["score_c"] = (df["C_atomic_fraction"] - c_min) / (c_max - c_min)
-    else:
-        df["score_c"] = 1.0
-
-    if "energy_above_hull_eV" in df.columns:
-        e_max = df["energy_above_hull_eV"].max()
-        if e_max > 0:
-            df["score_stability"] = 1.0 - df["energy_above_hull_eV"] / e_max
-        else:
-            df["score_stability"] = 1.0
-    else:
-        df["score_stability"] = 0.5
-
-    mp_center = (mp_min + mp_max) / 2
-    mp_range = (mp_max - mp_min) / 2
-    if "melting_point_C" in df.columns:
-        df["score_mp"] = df["melting_point_C"].apply(
-            lambda x: max(0, 1.0 - abs(x - mp_center) / mp_range) if pd.notna(x) else 0.0
-        )
-    else:
-        df["score_mp"] = 0.0
-
-    df["composite_score"] = (
-        weight_c_fraction * df["score_c"]
-        + weight_stability * df["score_stability"]
-        + weight_mp_proximity * df["score_mp"]
-    )
-
-    return df.sort_values("composite_score", ascending=False).reset_index(drop=True)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Screening workflow using internal MongoDB (no internet needed)"
@@ -150,13 +105,15 @@ def main():
 
     print(f"Found {len(df)} carbon-rich compounds across {df['chemsys'].nunique()} systems")
 
-    # Step 2: Annotate with melting points (curated + empirical, no MAPP here)
-    print("\n[Step 2/4] Annotating melting points (curated lookup + empirical)...")
-    df = annotate_with_melting_points(df)
+    # Step 2: Select best per system (by C fraction + stability only, NOT melting point)
+    print("\n[Step 2/4] Selecting best compound per system (C content + stability)...")
+    best = find_highest_carbon_per_system(df)
 
-    # Step 3: Rank candidates
-    print("\n[Step 3/4] Ranking candidates...")
-    df = rank_candidates(df, args.mp_min, args.mp_max)
+    # Step 3: Annotate with melting points (curated + empirical, no MAPP here)
+    # This is a downstream prediction step — it does NOT influence the selection above
+    print("\n[Step 3/4] Annotating melting points (curated lookup + empirical)...")
+    df = annotate_with_melting_points(df)
+    best = annotate_with_melting_points(best)
 
     # Step 4: Save and display results
     print("\n[Step 4/4] Saving results...")
@@ -165,9 +122,6 @@ def main():
     df.to_csv(full_file, index=False)
     print(f"  All compounds: {full_file} ({len(df)} rows)")
 
-    best = find_highest_carbon_per_system(df)
-    best = annotate_with_melting_points(best)
-    best = rank_candidates(best, args.mp_min, args.mp_max)
     best_file = f"{prefix}_best_per_system.csv"
     best.to_csv(best_file, index=False)
     print(f"  Best per system: {best_file} ({len(best)} rows)")
@@ -206,23 +160,23 @@ def main():
     stats.print_funnel(args.min_c_fraction, args.max_ehull,
                        args.mp_min, args.mp_max, args.experimental_only)
 
-    # Display top candidates
+    # Display all compounds (sorted by C fraction)
     print("\n" + "=" * 70)
-    print("TOP CANDIDATES (ranked by composite score)")
+    print("ALL SCREENED COMPOUNDS (sorted by C content)")
     print("=" * 70)
     display_cols = [
         "formula", "chemsys", "C_atomic_fraction", "C_weight_fraction",
-        "melting_point_C", "mp_source", "energy_above_hull_eV",
-        "composite_score", "material_id",
+        "energy_above_hull_eV", "melting_point_C", "mp_source", "material_id",
     ]
     cols = [c for c in display_cols if c in df.columns]
     print(df[cols].head(20).to_string(index=False))
 
-    # Best per system
+    # Best per system (selected by C content + stability, NOT melting point)
     print("\n" + "=" * 70)
-    print("HIGHEST CARBON COMPOUND PER SYSTEM")
+    print("BEST COMPOUND PER SYSTEM (by C content + stability)")
     print("=" * 70)
-    cols_best = ["formula", "chemsys", "C_atomic_fraction", "melting_point_C", "mp_source"]
+    cols_best = ["formula", "chemsys", "C_atomic_fraction", "energy_above_hull_eV",
+                 "melting_point_C", "mp_source"]
     cols_best = [c for c in cols_best if c in best.columns]
     print(best[cols_best].to_string(index=False))
 
