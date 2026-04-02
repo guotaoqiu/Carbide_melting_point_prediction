@@ -330,11 +330,18 @@ def screen_systems(
 
 
 def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
-    """For each chemsys, return the compound with the highest C atomic fraction."""
+    """For each chemsys, return the compound with the highest C atomic fraction.
+
+    Tie-breaking: when C fraction is equal, prefer lower energy_above_hull (more stable).
+    """
     if df.empty:
         return df
-    idx = df.groupby("chemsys")["C_atomic_fraction"].idxmax()
-    return df.loc[idx].sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
+    df_sorted = df.sort_values(
+        ["C_atomic_fraction", "energy_above_hull_eV"],
+        ascending=[False, True],
+    )
+    best = df_sorted.drop_duplicates(subset="chemsys", keep="first")
+    return best.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
 
 
 def main():
