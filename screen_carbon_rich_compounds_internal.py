@@ -347,26 +347,18 @@ def query_chemsys_mongo(
     chemsys: str,
 ) -> list[dict]:
     """
-    Query ALL C-containing compounds in a chemical system from the internal MongoDB.
+    Query C-containing compounds in a chemical system from the internal MongoDB.
 
-    No stability filter at the DB level — we fetch everything and filter client-side
-    so we can count the funnel properly. The chemsys field in mp_2022 uses
-    alphabetically sorted elements joined by "-".
+    Queries the exact chemsys only (no sub-system expansion).
+    Sub-systems like M-C are already generated separately as binary systems,
+    so expanding ternary M-X-C into its sub-systems would incorrectly
+    include nonmetal-C binaries (e.g., C-O, C-F) which are not carbides.
     """
     target_elements = chemsys.split("-")
     if "C" not in target_elements:
         raise ValueError(f"System {chemsys} does not contain carbon")
 
-    # Build all sub-chemsys that contain C
-    non_c_elements = [e for e in target_elements if e != "C"]
-    sub_systems = set()
-    for r in range(len(non_c_elements) + 1):
-        for combo in itertools.combinations(non_c_elements, r):
-            sub_elements = sorted(list(combo) + ["C"])
-            sub_systems.add("-".join(sub_elements))
-    sub_systems.discard("C")
-
-    query = {"chemsys": {"$in": list(sub_systems)}}
+    query = {"chemsys": chemsys}
 
     projection = {
         "material_id": 1, "formula_pretty": 1, "chemsys": 1,
