@@ -76,7 +76,7 @@ PARTNER_GROUPS = {
     "alkali": METAL_GROUPS["alkali"],
 }
 
-SEARCH_MODES = ["binary", "ternary", "bimetal", "all", "comprehensive"]
+SEARCH_MODES = ["binary", "ternary", "bimetal", "all", "combinations", "comprehensive"]
 
 
 # ── Screening funnel statistics ──────────────────────────────────────────────
@@ -142,9 +142,49 @@ def generate_systems(
     partner_group: Optional[str] = None,
     partner_elements: Optional[list[str]] = None,
 ) -> list[str]:
-    """Generate chemical system strings based on search mode."""
+    """Generate chemical system strings based on search mode.
+
+    Modes:
+        binary:        M-C for one metal group
+        ternary:       M-partner-C for one metal group + one partner group
+        bimetal:       M1-M2-C for one metal group + one partner group
+        all:           binary + ternary + bimetal for one metal group + partner
+        combinations:  ALL metal groups x ALL partner groups, including:
+                       - binary M-C for every metal group
+                       - ternary M-X-C for every metal group x every nonmetal group
+                       - bimetal M1-M2-C for every metal group x every metal group
+                       No --metal-group or --partner-group needed.
+        comprehensive: queries entire DB directly, no system generation
+    """
     if mode == "comprehensive":
-        return []  # comprehensive queries the whole DB, no system list needed
+        return []
+
+    if mode == "combinations":
+        systems = set()
+        all_metals = []
+        for group_name, elements in METAL_GROUPS.items():
+            all_metals.extend(elements)
+
+        # Deduplicate metals
+        all_metals = list(dict.fromkeys(all_metals))
+
+        # Binary: every metal + C
+        for m in all_metals:
+            systems.add("-".join(sorted([m, "C"])))
+
+        # Ternary: every metal x every nonmetal (including extended) + C
+        all_nonmetals = list(dict.fromkeys(
+            PARTNER_GROUPS["nonmetal_extended"]
+        ))
+        for m, x in itertools.product(all_metals, all_nonmetals):
+            if m != x:
+                systems.add("-".join(sorted([m, x, "C"])))
+
+        # Bimetal: every metal x every metal + C (unique pairs)
+        for m1, m2 in itertools.combinations(all_metals, 2):
+            systems.add("-".join(sorted([m1, m2, "C"])))
+
+        return sorted(systems)
 
     if metal_group is None:
         raise ValueError("--metal-group is required when not using --systems")
@@ -198,6 +238,9 @@ def build_output_name(mode: str, metal_group: Optional[str],
     if mode == "comprehensive":
         return "carbon_rich_comprehensive.csv"
 
+    if mode == "combinations":
+        return "carbon_rich_combinations.csv"
+
     if systems:
         sys_str = "_".join(systems[:3])
         if len(systems) > 3:
@@ -215,7 +258,7 @@ def build_output_name(mode: str, metal_group: Optional[str],
     return f"carbon_rich_{'_'.join(parts)}.csv"
 
 
-def _parse_doc(doc, chemsys_override: str = "") -> dict | None:
+def _parse_doc(doc, chemsys_override: str = "") -> Optional[dict]:
     """Parse a MongoDB document into a result dict. Returns None if invalid."""
     comp_dict = doc.get("composition_reduced", {})
     if not comp_dict or "C" not in comp_dict:
@@ -455,7 +498,8 @@ def main():
     parser.add_argument(
         "--mode", default="ternary", choices=SEARCH_MODES,
         help=("Search mode: 'binary'=M-C, 'ternary'=M-partner-C, 'bimetal'=M1-M2-C, "
-              "'all'=combined, 'comprehensive'=ALL carbides in DB (default: ternary)")
+              "'all'=combined, 'combinations'=all metal/partner group combos, "
+              "'comprehensive'=ALL carbides in DB (default: ternary)")
     )
     parser.add_argument(
         "--metal-group", default=None, choices=list(METAL_GROUPS.keys()),
