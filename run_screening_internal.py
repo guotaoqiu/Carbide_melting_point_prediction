@@ -41,7 +41,7 @@ def main():
     )
     parser.add_argument(
         "--mode", default="ternary", choices=SEARCH_MODES,
-        help="Search mode: binary/ternary/bimetal/all (default: ternary)"
+        help="Search mode: binary/ternary/bimetal/all/comprehensive (default: ternary)"
     )
     parser.add_argument("--metal-group", default=None, choices=list(METAL_GROUPS.keys()),
                         help="Primary metal element group")

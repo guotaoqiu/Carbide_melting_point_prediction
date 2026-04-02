@@ -76,7 +76,7 @@ PARTNER_GROUPS = {
     "alkali": METAL_GROUPS["alkali"],
 }
 
-SEARCH_MODES = ["binary", "ternary", "bimetal", "all"]
+SEARCH_MODES = ["binary", "ternary", "bimetal", "all", "comprehensive"]
 
 
 # ── Screening funnel statistics ──────────────────────────────────────────────
@@ -101,7 +101,10 @@ class ScreeningStats:
         print("\n" + "=" * 70)
         print("SCREENING FUNNEL STATISTICS")
         print("=" * 70)
-        print(f"  Chemical systems queried:                 {self.systems_queried}")
+        if self.systems_queried > 0:
+            print(f"  Chemical systems queried:                 {self.systems_queried}")
+        else:
+            print(f"  Mode: comprehensive (all carbides in DB)")
         print(f"  C-containing compounds from DB:           {self.total_returned}")
         print(f"    - Experimental:                          {self.experimental}")
         print(f"    - Not experimental:                      {self.not_experimental}")
@@ -140,6 +143,9 @@ def generate_systems(
     partner_elements: Optional[list[str]] = None,
 ) -> list[str]:
     """Generate chemical system strings based on search mode."""
+    if mode == "comprehensive":
+        return []  # comprehensive queries the whole DB, no system list needed
+
     if metal_group is None:
         raise ValueError("--metal-group is required when not using --systems")
 
@@ -189,8 +195,10 @@ def build_output_name(mode: str, metal_group: Optional[str],
                       partner_elements: Optional[list[str]],
                       systems: Optional[list[str]]) -> str:
     """Build a descriptive output filename from the search parameters."""
+    if mode == "comprehensive":
+        return "carbon_rich_comprehensive.csv"
+
     if systems:
-        # Use first and last system to make a readable name
         sys_str = "_".join(systems[:3])
         if len(systems) > 3:
             sys_str += f"_etc{len(systems)}"
@@ -205,6 +213,90 @@ def build_output_name(mode: str, metal_group: Optional[str],
         parts.append("-".join(partner_elements[:3]))
 
     return f"carbon_rich_{'_'.join(parts)}.csv"
+
+
+def _parse_doc(doc, chemsys_override: str = "") -> dict | None:
+    """Parse a MongoDB document into a result dict. Returns None if invalid."""
+    comp_dict = doc.get("composition_reduced", {})
+    if not comp_dict or "C" not in comp_dict:
+        return None
+
+    comp = Composition(comp_dict)
+    c_frac = comp.get_atomic_fraction("C")
+    if c_frac == 0:
+        return None
+
+    n_elements = doc.get("nelements", len(comp.elements))
+    if n_elements < 2:
+        return None
+
+    c_wt_frac = comp.get_wt_fraction("C")
+
+    spacegroup = ""
+    crystal_system = ""
+    sym = doc.get("symmetry", {})
+    if sym:
+        spacegroup = sym.get("symbol", "")
+        crystal_system = sym.get("crystal_system", "")
+
+    ehull = doc.get("energy_above_hull")
+    fe = doc.get("formation_energy_per_atom")
+
+    is_theoretical = doc.get("theoretical", None)
+    if is_theoretical is not None:
+        is_experimental = not is_theoretical
+    else:
+        is_experimental = None
+
+    return {
+        "material_id": doc.get("material_id", str(doc.get("_id", ""))),
+        "formula": doc.get("formula_pretty", str(comp.reduced_formula)),
+        "chemsys": doc.get("chemsys", chemsys_override),
+        "C_atomic_fraction": round(c_frac, 4),
+        "C_weight_fraction": round(c_wt_frac, 4),
+        "n_elements": n_elements,
+        "energy_above_hull_eV": round(ehull, 4) if ehull is not None else None,
+        "formation_energy_eV": round(fe, 4) if fe is not None else None,
+        "spacegroup": spacegroup,
+        "crystal_system": crystal_system,
+        "density_g_cm3": round(doc.get("density", 0), 2) if doc.get("density") else None,
+        "experimental": is_experimental,
+    }
+
+
+def query_all_carbides(col) -> list[dict]:
+    """
+    Query ALL carbon-containing compounds from the entire database in one go.
+
+    Uses elements array to find any compound containing C with at least 2 elements.
+    This is the comprehensive mode — no system-by-system enumeration needed.
+    """
+    query = {
+        "elements": {"$all": ["C"]},
+        "nelements": {"$gte": 2},
+    }
+
+    projection = {
+        "material_id": 1, "formula_pretty": 1, "chemsys": 1,
+        "composition_reduced": 1, "nelements": 1, "nsites": 1,
+        "energy_above_hull": 1, "formation_energy_per_atom": 1,
+        "symmetry": 1, "volume": 1, "density": 1, "theoretical": 1,
+    }
+
+    try:
+        cursor = col.find(query, projection)
+        docs = list(cursor)
+    except Exception as e:
+        print(f"  Warning: failed to query all carbides: {e}")
+        return []
+
+    results = []
+    for doc in docs:
+        r = _parse_doc(doc)
+        if r is not None:
+            results.append(r)
+
+    return results
 
 
 def query_chemsys_mongo(
@@ -234,18 +326,10 @@ def query_chemsys_mongo(
     query = {"chemsys": {"$in": list(sub_systems)}}
 
     projection = {
-        "material_id": 1,
-        "formula_pretty": 1,
-        "chemsys": 1,
-        "composition_reduced": 1,
-        "nelements": 1,
-        "nsites": 1,
-        "energy_above_hull": 1,
-        "formation_energy_per_atom": 1,
-        "symmetry": 1,
-        "volume": 1,
-        "density": 1,
-        "theoretical": 1,
+        "material_id": 1, "formula_pretty": 1, "chemsys": 1,
+        "composition_reduced": 1, "nelements": 1, "nsites": 1,
+        "energy_above_hull": 1, "formation_energy_per_atom": 1,
+        "symmetry": 1, "volume": 1, "density": 1, "theoretical": 1,
     }
 
     try:
@@ -257,53 +341,9 @@ def query_chemsys_mongo(
 
     results = []
     for doc in docs:
-        comp_dict = doc.get("composition_reduced", {})
-        if not comp_dict or "C" not in comp_dict:
-            continue
-
-        comp = Composition(comp_dict)
-        c_frac = comp.get_atomic_fraction("C")
-        if c_frac == 0:
-            continue
-
-        n_elements = doc.get("nelements", len(comp.elements))
-        if n_elements < 2:
-            continue
-
-        c_wt_frac = comp.get_wt_fraction("C")
-
-        spacegroup = ""
-        crystal_system = ""
-        sym = doc.get("symmetry", {})
-        if sym:
-            spacegroup = sym.get("symbol", "")
-            crystal_system = sym.get("crystal_system", "")
-
-        ehull = doc.get("energy_above_hull")
-        fe = doc.get("formation_energy_per_atom")
-
-        # Label as experimental (True) or not (False)
-        # MP uses theoretical=True for predicted structures, so experimental = NOT theoretical
-        is_theoretical = doc.get("theoretical", None)
-        if is_theoretical is not None:
-            is_experimental = not is_theoretical
-        else:
-            is_experimental = None  # unknown
-
-        results.append({
-            "material_id": doc.get("material_id", str(doc.get("_id", ""))),
-            "formula": doc.get("formula_pretty", str(comp.reduced_formula)),
-            "chemsys": doc.get("chemsys", chemsys),
-            "C_atomic_fraction": round(c_frac, 4),
-            "C_weight_fraction": round(c_wt_frac, 4),
-            "n_elements": n_elements,
-            "energy_above_hull_eV": round(ehull, 4) if ehull is not None else None,
-            "formation_energy_eV": round(fe, 4) if fe is not None else None,
-            "spacegroup": spacegroup,
-            "crystal_system": crystal_system,
-            "density_g_cm3": round(doc.get("density", 0), 2) if doc.get("density") else None,
-            "experimental": is_experimental,
-        })
+        r = _parse_doc(doc, chemsys)
+        if r is not None:
+            results.append(r)
 
     return results
 
@@ -332,31 +372,39 @@ def screen_systems(
     Returns:
         (filtered_df, stats) tuple
     """
-    if systems is None:
-        systems = generate_systems(mode, metal_group, partner_group, partner_elements)
-
-    stats = ScreeningStats()
-    stats.systems_queried = len(systems)
-    print(f"Will query {len(systems)} chemical systems from internal DB")
-
     col = get_collection(mongo_uri, db_name, collection_name)
+    stats = ScreeningStats()
 
-    # Collect results, deduplicate by material_id
-    seen_ids = set()
-    all_results = []
-    for i, sys in enumerate(systems):
-        print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
-        results = query_chemsys_mongo(col, sys)
-        new_count = 0
-        for r in results:
-            if r["material_id"] not in seen_ids:
-                seen_ids.add(r["material_id"])
-                all_results.append(r)
-                new_count += 1
-        if new_count > 0:
-            print(f"  Found {len(results)} compounds ({new_count} new)")
-        else:
-            print(f"  No new compounds found")
+    # ── Comprehensive mode: single query for ALL carbides ────────────────
+    if mode == "comprehensive":
+        print("Comprehensive mode: querying ALL carbon-containing compounds in database...")
+        all_results = query_all_carbides(col)
+        stats.systems_queried = 0  # not system-based
+        print(f"  Found {len(all_results)} C-containing compounds total")
+
+    # ── System-by-system mode ────────────────────────────────────────────
+    else:
+        if systems is None:
+            systems = generate_systems(mode, metal_group, partner_group, partner_elements)
+
+        stats.systems_queried = len(systems)
+        print(f"Will query {len(systems)} chemical systems from internal DB")
+
+        seen_ids = set()
+        all_results = []
+        for i, sys in enumerate(systems):
+            print(f"[{i+1}/{len(systems)}] Querying {sys} ...")
+            results = query_chemsys_mongo(col, sys)
+            new_count = 0
+            for r in results:
+                if r["material_id"] not in seen_ids:
+                    seen_ids.add(r["material_id"])
+                    all_results.append(r)
+                    new_count += 1
+            if new_count > 0:
+                print(f"  Found {len(results)} compounds ({new_count} new)")
+            else:
+                print(f"  No new compounds found")
 
     if not all_results:
         return pd.DataFrame(), stats
@@ -406,7 +454,8 @@ def main():
     )
     parser.add_argument(
         "--mode", default="ternary", choices=SEARCH_MODES,
-        help="Search mode: 'binary'=M-C, 'ternary'=M-partner-C, 'bimetal'=M1-M2-C, 'all'=combined (default: ternary)"
+        help=("Search mode: 'binary'=M-C, 'ternary'=M-partner-C, 'bimetal'=M1-M2-C, "
+              "'all'=combined, 'comprehensive'=ALL carbides in DB (default: ternary)")
     )
     parser.add_argument(
         "--metal-group", default=None, choices=list(METAL_GROUPS.keys()),

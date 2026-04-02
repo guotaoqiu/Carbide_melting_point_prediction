@@ -445,7 +445,8 @@ The `--mode` flag controls what types of chemical systems are generated:
 | `binary` | M-C | Find simple metal carbides. No `--partner-group` needed |
 | `ternary` | M-partner-C | Metal + any partner element + carbon. Requires `--partner-group` or `--partner-elements` |
 | `bimetal` | M1-M2-C | Two metals + carbon. If `--partner-group` is a metal group, generates cross-group pairs. If omitted, generates pairs within `--metal-group` |
-| `all` | M-C + M-partner-C + M1-M2-C | Comprehensive search. Generates all binary, ternary, and bimetal systems. Requires `--partner-group` or `--partner-elements` for the ternary/bimetal components |
+| `all` | M-C + M-partner-C + M1-M2-C | Combined search for a specific metal group. Requires `--partner-group` or `--partner-elements` for the ternary/bimetal components |
+| `comprehensive` | ALL carbides in DB | **Single query for every C-containing compound in the entire database.** No `--metal-group` or `--partner-group` needed. Outputs all M-C, M-X-C, M1-M2-C at once |
 
 **Note:** `--systems` always takes priority over `--mode`. If you provide explicit systems, mode is ignored.
 
@@ -455,6 +456,7 @@ The `--mode` flag controls what types of chemical systems are generated:
 - **ternary**: For each (M, partner) pair, generates the canonical sorted system (e.g., `B-C-La`)
 - **bimetal**: For each (M1, M2) pair across groups, generates `M1-M2-C`. If no partner is specified, generates all pairs within `--metal-group` using combinations
 - **all**: Union of all three above
+- **comprehensive**: Queries `elements: {$all: ["C"]}` on the entire database — no system enumeration needed. Returns every compound containing carbon
 
 Duplicate systems are automatically removed. Results are deduplicated by `material_id`.
 
