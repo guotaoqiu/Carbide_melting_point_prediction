@@ -23,6 +23,7 @@ Requirements:
 
 import argparse
 import itertools
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -344,6 +345,61 @@ def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
     return best.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
 
 
+def download_structures(
+    api_key: str,
+    material_ids: list,
+    output_dir: str,
+):
+    """
+    Download structure files (POSCAR format) for given material IDs from Materials Project API.
+
+    Each structure is saved as a POSCAR file named: <material_id>_<formula>.vasp
+    inside a subdirectory organized by chemsys.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    with MPRester(api_key) as mpr:
+        docs = mpr.materials.summary.search(
+            material_ids=material_ids,
+            fields=["material_id", "formula_pretty", "structure"],
+        )
+
+    print(f"Found {len(docs)}/{len(material_ids)} structures from MP API")
+
+    saved = 0
+    failed = 0
+    for doc in docs:
+        mid = str(doc.material_id)
+        formula = doc.formula_pretty.replace(" ", "")
+        structure = doc.structure
+
+        if structure is None:
+            print(f"  Warning: {mid} ({formula}) has no structure, skipping")
+            failed += 1
+            continue
+
+        try:
+            # Derive chemsys from structure
+            chemsys = structure.composition.chemical_system
+
+            chemsys_dir = os.path.join(output_dir, chemsys)
+            os.makedirs(chemsys_dir, exist_ok=True)
+
+            filename = f"{mid}_{formula}.vasp"
+            filepath = os.path.join(chemsys_dir, filename)
+            structure.to(fmt="poscar", filename=filepath)
+            saved += 1
+        except Exception as e:
+            print(f"  Warning: failed to save {mid} ({formula}): {e}")
+            failed += 1
+
+    print(f"Saved {saved} POSCAR files to {output_dir}/")
+    if failed > 0:
+        print(f"  ({failed} failed)")
+
+    return saved
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Screen chemical systems for carbon-rich compounds via Materials Project API"
@@ -358,6 +414,10 @@ def main():
     parser.add_argument("--partner-elements", nargs="+", default=None)
     parser.add_argument("--min-c-fraction", type=float, default=0.2)
     parser.add_argument("--max-ehull", type=float, default=0.1)
+    parser.add_argument("--download", action="store_true",
+                        help="Download POSCAR structure files for best-per-system compounds")
+    parser.add_argument("--download-dir", default=None,
+                        help="Directory for POSCAR files (default: structures_<output_name>)")
     parser.add_argument("--output", default=None,
                         help="Output CSV filename (auto-generated if not specified)")
     args = parser.parse_args()
@@ -403,6 +463,16 @@ def main():
     print(best[display_cols].to_string(index=False))
 
     stats.print_funnel(args.min_c_fraction, args.max_ehull)
+
+    # Download POSCAR files for best-per-system compounds
+    if args.download:
+        dl_dir = args.download_dir or f"structures_{output.replace('.csv', '')}"
+        print(f"\nDownloading POSCAR files for {len(best)} best-per-system compounds...")
+        download_structures(
+            api_key=args.api_key,
+            material_ids=best["material_id"].tolist(),
+            output_dir=dl_dir,
+        )
 
 
 if __name__ == "__main__":

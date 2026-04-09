@@ -73,8 +73,8 @@ python run_screening_internal.py [OPTIONS]
 | `--db-name` | No | `opendb` | Database name |
 | `--collection` | No | `mp_2022` | Collection name |
 | `--output-prefix` | No | `screening_<timestamp>` | Prefix for output files |
-
-### Examples
+| `--download` | No | `False` | Download POSCAR structure files for best-per-system compounds |
+| `--download-dir` | No | `structures_<output_name>` | Directory for POSCAR files |
 
 ```bash
 # Full search: binary + ternary + bimetal for rare earths
@@ -239,6 +239,31 @@ Output filenames are auto-generated from the search parameters:
 - `carbon_rich_B-C-La_C-Hf-Ta_C-La.csv` (when using `--systems`)
 
 Use `--output` or `--output-prefix` to override.
+
+### Downloading Structure Files (POSCAR)
+
+Add `--download` to save POSCAR files for all best-per-system compounds:
+
+```bash
+# Internal DB version
+python screen_carbon_rich_compounds_internal.py --mode combinations --download
+
+# MP API version
+python screen_carbon_rich_compounds.py --api-key KEY --mode ternary \
+    --metal-group rare_earth --partner-group nonmetal --download
+```
+
+POSCAR files are organized by chemsys:
+```
+structures_carbon_rich_combinations/
+  B-C-La/
+    mp-10852_La(BC)2.vasp
+  B-C-Ti/
+    mp-5765_TiB2C.vasp
+  ...
+```
+
+Custom output directory: `--download-dir my_structures/`
 
 ---
 

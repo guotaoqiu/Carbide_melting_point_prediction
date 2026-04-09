@@ -26,6 +26,7 @@ Requirements:
 
 import argparse
 import itertools
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -488,6 +489,74 @@ def find_highest_carbon_per_system(df: pd.DataFrame) -> pd.DataFrame:
     return best.sort_values("C_atomic_fraction", ascending=False).reset_index(drop=True)
 
 
+def download_structures(
+    material_ids: list,
+    output_dir: str,
+    mongo_uri: str = MONGO_URI,
+    db_name: str = MONGO_DB,
+    collection_name: str = MONGO_COLLECTION,
+):
+    """
+    Download structure files (POSCAR format) for given material IDs from internal MongoDB.
+
+    Each structure is saved as a POSCAR file named: <material_id>_<formula>.vasp
+    inside a subdirectory organized by chemsys.
+
+    Args:
+        material_ids: List of material_id strings (e.g., ["mp-10852", "mp-568090"])
+        output_dir: Directory to save POSCAR files
+        mongo_uri: MongoDB connection URI
+        db_name: Database name
+        collection_name: Collection name
+    """
+    from pymatgen.core import Structure as PmgStructure
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    col = get_collection(mongo_uri, db_name, collection_name)
+
+    query = {"material_id": {"$in": list(material_ids)}}
+    projection = {"material_id": 1, "formula_pretty": 1, "chemsys": 1, "structure": 1}
+
+    docs = list(col.find(query, projection))
+    print(f"Found {len(docs)}/{len(material_ids)} structures in database")
+
+    saved = 0
+    failed = 0
+    for doc in docs:
+        mid = doc.get("material_id", "unknown")
+        formula = doc.get("formula_pretty", "unknown").replace(" ", "")
+        chemsys = doc.get("chemsys", "unknown")
+        struct_dict = doc.get("structure")
+
+        if struct_dict is None:
+            print(f"  Warning: {mid} ({formula}) has no structure data, skipping")
+            failed += 1
+            continue
+
+        try:
+            structure = PmgStructure.from_dict(struct_dict)
+
+            # Create chemsys subdirectory
+            chemsys_dir = os.path.join(output_dir, chemsys)
+            os.makedirs(chemsys_dir, exist_ok=True)
+
+            # Save as POSCAR
+            filename = f"{mid}_{formula}.vasp"
+            filepath = os.path.join(chemsys_dir, filename)
+            structure.to(fmt="poscar", filename=filepath)
+            saved += 1
+        except Exception as e:
+            print(f"  Warning: failed to convert {mid} ({formula}): {e}")
+            failed += 1
+
+    print(f"Saved {saved} POSCAR files to {output_dir}/")
+    if failed > 0:
+        print(f"  ({failed} failed)")
+
+    return saved
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Screen chemical systems for carbon-rich compounds from internal MongoDB (opendb.mp_2022)"
@@ -524,6 +593,10 @@ def main():
                         help=f"Database name (default: {MONGO_DB})")
     parser.add_argument("--collection", default=MONGO_COLLECTION,
                         help=f"Collection name (default: {MONGO_COLLECTION})")
+    parser.add_argument("--download", action="store_true",
+                        help="Download POSCAR structure files for best-per-system compounds")
+    parser.add_argument("--download-dir", default=None,
+                        help="Directory for POSCAR files (default: structures_<output_name>)")
     parser.add_argument("--output", default=None,
                         help="Output CSV filename (auto-generated if not specified)")
     args = parser.parse_args()
@@ -575,6 +648,18 @@ def main():
     print(best[display_cols].to_string(index=False))
 
     stats.print_funnel(args.min_c_fraction, args.max_ehull)
+
+    # Download POSCAR files for best-per-system compounds
+    if args.download:
+        dl_dir = args.download_dir or f"structures_{output.replace('.csv', '')}"
+        print(f"\nDownloading POSCAR files for {len(best)} best-per-system compounds...")
+        download_structures(
+            material_ids=best["material_id"].tolist(),
+            output_dir=dl_dir,
+            mongo_uri=args.mongo_uri,
+            db_name=args.db_name,
+            collection_name=args.collection,
+        )
 
 
 if __name__ == "__main__":
